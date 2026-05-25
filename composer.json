@@ -1,0 +1,68 @@
+{
+    "name": "jake142/receiptscanner",
+    "description": "A minimal PHP 8.3 Laravel package that wraps upstream multimodal LLM providers to extract structured receipt JSON from receipt images or a single receipt PDF.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "receipt",
+        "scanner",
+        "ocr",
+        "llm",
+        "openai",
+        "azure-openai",
+        "gemini",
+        "anthropic"
+    ],
+    "homepage": "https://github.com/jake142/receiptscanner",
+    "support": {
+        "issues": "https://github.com/jake142/receiptscanner/issues",
+        "source": "https://github.com/jake142/receiptscanner"
+    },
+    "authors": [
+        {
+            "name": "jake142"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/http": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "phpunit/phpunit": "^11.0|^12.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Jake142\\ReceiptScanner\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Jake142\\ReceiptScanner\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Jake142\\ReceiptScanner\\ReceiptScannerServiceProvider"
+            ],
+            "aliases": {
+                "ReceiptScanner": "Jake142\\ReceiptScanner\\Facades\\ReceiptScanner"
+            }
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/phpunit",
+        "test:unit": "vendor/bin/phpunit --testsuite Unit"
+    },
+    "config": {
+        "platform": {
+            "php": "8.3.0"
+        },
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
