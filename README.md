@@ -4,6 +4,8 @@ ReceiptScanner is a small Laravel package for extracting structured receipt data
 
 It is a wrapper around multimodal LLM APIs. It does not host its own OCR service, database, queue, UI, or REST API.
 
+The package i created by Packr.
+
 ## Features
 
 - Laravel facade entry point: `Jake142\ReceiptScanner\Facades\ReceiptScanner`
