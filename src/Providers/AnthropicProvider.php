@@ -86,7 +86,7 @@ class AnthropicProvider
         $toolInput = $this->extractToolInput($body);
 
         if ($toolInput !== null) {
-            return $toolInput;
+            return $this->normalizeReceipt($toolInput);
         }
 
         $text = $this->extractText($body);
@@ -95,7 +95,7 @@ class AnthropicProvider
             throw new RuntimeException('Anthropic receipt extraction response did not contain tool input or text output.');
         }
 
-        return $this->decodeJsonObject($text);
+        return $this->normalizeReceipt($this->decodeJsonObject($text));
     }
 
     private function messagesEndpoint(): string
@@ -154,12 +154,12 @@ class AnthropicProvider
 
     private function systemPrompt(): string
     {
-        return 'You are a precise receipt extraction engine. Extract only information present in the supplied receipt image or PDF. Use null when a requested scalar value is unknown, use an empty array when no line items are visible, and do not invent merchants, dates, currencies, totals, tax values, VAT values, MCCs, confidence scores, or metadata.';
+        return 'You are a precise receipt extraction engine. Extract only information present in the supplied receipt image or PDF. Use null when a requested scalar value is unknown, use an empty array when no line items are visible, and do not invent merchants, dates, currencies, totals, tax values, VAT values, MCCs, confidence scores, or metadata. Always return VAT breakdown as vats[] rows with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
     }
 
     private function userPrompt(array $fields): string
     {
-        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. Return values for these package fields exactly when requested: '.implode(', ', $fields).'. Preserve the package schema: merchant, date, total, amount, tax, vat, currency, line_items, mcc, confidence, and metadata. Dates should be ISO-8601 when the receipt provides enough information. Currency should be an ISO-4217 code when it can be inferred from the receipt. Line items should be an array of objects.';
+        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. Return values for these package fields exactly when requested: '.implode(', ', $fields).'. Preserve the package schema: merchant, date, total, amount, currency, line_items, mcc, confidence, metadata, and vats. Do not return legacy tax or vat scalar fields when vats is requested. Dates should be ISO-8601 when the receipt provides enough information. Currency should be an ISO-4217 code when it can be inferred from the receipt. Line items should be an array of objects.';
     }
 
     private function toolInputSchema(array $fields): array
@@ -189,7 +189,7 @@ class AnthropicProvider
                 'type' => ['string', 'null'],
                 'description' => 'Receipt date, preferably ISO-8601 when the full date can be determined.',
             ],
-            'total', 'amount', 'tax', 'vat' => [
+            'total', 'amount' => [
                 'type' => ['number', 'string', 'null'],
                 'description' => 'Monetary amount from the receipt without inventing missing values.',
             ],
@@ -209,8 +209,23 @@ class AnthropicProvider
                         'unit_price' => ['type' => ['number', 'string', 'null']],
                         'total' => ['type' => ['number', 'string', 'null']],
                         'amount' => ['type' => ['number', 'string', 'null']],
-                        'tax' => ['type' => ['number', 'string', 'null']],
+                        'vat_rate' => ['type' => ['number', 'string', 'null']],
+                        'vat_amount' => ['type' => ['number', 'string', 'null']],
                         'sku' => ['type' => ['string', 'null']],
+                    ],
+                ],
+            ],
+            'vats' => [
+                'type' => 'array',
+                'description' => 'VAT breakdown rows for the receipt.',
+                'items' => [
+                    'type' => 'object',
+                    'additionalProperties' => true,
+                    'properties' => [
+                        'vat_rate' => ['type' => ['number', 'string', 'null']],
+                        'amount_excluding_vat' => ['type' => ['number', 'string', 'null']],
+                        'vat_amount' => ['type' => ['number', 'string', 'null']],
+                        'amount_including_vat' => ['type' => ['number', 'string', 'null']],
                     ],
                 ],
             ],
@@ -375,10 +390,9 @@ class AnthropicProvider
             'date',
             'total',
             'amount',
-            'tax',
-            'vat',
             'currency',
             'line_items',
+            'vats',
             'mcc',
             'confidence',
             'metadata',
@@ -462,6 +476,68 @@ class AnthropicProvider
         }
 
         throw new RuntimeException('Anthropic receipt extraction response did not contain a valid JSON object.');
+    }
+
+    private function normalizeReceipt(array $payload): array
+    {
+        if (isset($payload['tax']) || isset($payload['vat']) || isset($payload['tax_amount'])) {
+            $payload['vats'] = $this->normalizeVats($payload);
+            unset($payload['tax'], $payload['vat'], $payload['tax_amount']);
+        }
+
+        if (isset($payload['vats']) && is_array($payload['vats'])) {
+            $payload['vats'] = $this->normalizeVats(['vats' => $payload['vats']]);
+        }
+
+        return $payload;
+    }
+
+    private function normalizeVats(array $payload): array
+    {
+        $vats = $payload['vats'] ?? null;
+
+        if (is_array($vats) && $vats !== []) {
+            return array_values(array_map(function ($row): array {
+                $row = is_array($row) ? $row : [];
+
+                return [
+                    'vat_rate' => $this->numericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
+                    'amount_excluding_vat' => $this->numericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['amount'] ?? null),
+                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? null),
+                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['total'] ?? null),
+                ];
+            }, $vats));
+        }
+
+        $singleVat = $payload['vat'] ?? $payload['tax'] ?? $payload['tax_amount'] ?? null;
+
+        if ($singleVat === null) {
+            return [];
+        }
+
+        return [[
+            'vat_rate' => $this->numericOrNull($payload['vat_rate'] ?? null),
+            'amount_excluding_vat' => $this->numericOrNull($payload['amount_excluding_vat'] ?? $payload['net_amount'] ?? null),
+            'vat_amount' => $this->numericOrNull($singleVat),
+            'amount_including_vat' => $this->numericOrNull($payload['amount_including_vat'] ?? $payload['total'] ?? null),
+        ]];
+    }
+
+    private function numericOrNull(mixed $value): ?float
+    {
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+
+        if (is_string($value)) {
+            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
+
+            if ($normalized !== '' && is_numeric($normalized)) {
+                return (float) $normalized;
+            }
+        }
+
+        return null;
     }
 
     private function throwProviderHttpError(Response $response): never

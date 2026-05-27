@@ -77,7 +77,7 @@ class OpenAiProvider
             throw new RuntimeException('OpenAI receipt extraction did not return a JSON object.');
         }
 
-        return $decoded;
+        return $this->normalizeReceiptPayload($decoded, $fields);
     }
 
     /**
@@ -500,5 +500,93 @@ class OpenAiProvider
         $text = preg_replace('/data:(?:image|application)\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+\/=\r\n]+/i', '[redacted-file-data]', $text) ?? $text;
 
         return $text;
+    }
+
+    /**
+     * Normalize legacy provider payloads into the canonical receipt schema.
+     *
+     * @param array<string, mixed> $payload
+     * @param array<int, string> $fields
+     * @return array<string, mixed>
+     */
+    private function normalizeReceiptPayload(array $payload, array $fields): array
+    {
+        if (isset($payload['tax']) && ! isset($payload['vat_amount'])) {
+            $payload['vat_amount'] = $payload['tax'];
+        }
+
+        if (isset($payload['vat']) && ! isset($payload['vat_amount'])) {
+            $payload['vat_amount'] = $payload['vat'];
+        }
+
+        if (! isset($payload['vats']) || ! is_array($payload['vats'])) {
+            $payload['vats'] = $this->buildVatsFromLegacyFields($payload);
+        } else {
+            $payload['vats'] = $this->normalizeVats($payload['vats']);
+        }
+
+        if (in_array('vats', $fields, true)) {
+            unset($payload['tax'], $payload['vat']);
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildVatsFromLegacyFields(array $payload): array
+    {
+        $vatAmount = $this->numericValue($payload['vat_amount'] ?? null);
+        $amount = $this->numericValue($payload['amount'] ?? null);
+
+        if ($vatAmount === null && ! isset($payload['tax']) && ! isset($payload['vat'])) {
+            return [];
+        }
+
+        return [[
+            'vat_rate' => $this->numericValue($payload['vat_rate'] ?? null),
+            'amount_excluding_vat' => $this->numericValue($payload['amount_excluding_vat'] ?? null),
+            'vat_amount' => $vatAmount,
+            'amount_including_vat' => $this->numericValue($payload['amount_including_vat'] ?? $amount),
+        ]];
+    }
+
+    /**
+     * @param array<int, mixed> $vats
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeVats(array $vats): array
+    {
+        $normalized = [];
+
+        foreach ($vats as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $normalized[] = [
+                'vat_rate' => $this->numericValue($row['vat_rate'] ?? null),
+                'amount_excluding_vat' => $this->numericValue($row['amount_excluding_vat'] ?? null),
+                'vat_amount' => $this->numericValue($row['vat_amount'] ?? ($row['vat'] ?? ($row['tax'] ?? null))),
+                'amount_including_vat' => $this->numericValue($row['amount_including_vat'] ?? null),
+            ];
+        }
+
+        return $normalized;
+    }
+
+    private function numericValue(mixed $value): mixed
+    {
+        if (is_int($value) || is_float($value)) {
+            return $value;
+        }
+
+        if (is_string($value) && is_numeric(trim($value))) {
+            return $value + 0;
+        }
+
+        return $value;
     }
 }

@@ -43,7 +43,7 @@ class AzureOpenAiProvider
             $parsed = $this->decodeJsonText($text, $response, $mode);
         }
 
-        return $this->coerceReceiptFields($parsed, $fields);
+        return $this->normalizeReceipt($parsed, $fields);
     }
 
     private function providerConfig(): array
@@ -142,7 +142,7 @@ class AzureOpenAiProvider
 
     private function buildPrompt(array $fields): string
     {
-        return 'Extract structured receipt data from the attached receipt image or PDF. Return only a JSON object matching the provided schema. Use null for unknown scalar values, an empty array for missing line_items, and an empty object for missing metadata. Requested top-level fields: '.implode(', ', $fields).'.';
+        return 'Extract structured receipt data from the attached receipt image or PDF. Analyze all provided images together as one receipt and merge them in order. Return only a JSON object matching the provided schema. Use null for unknown scalar values, an empty array for missing line_items, and an empty object for missing metadata. Requested top-level fields: '.implode(', ', $fields).'. VAT must be returned as vats[] with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
     }
 
     private function normalizePaths(array $context): array
@@ -257,11 +257,10 @@ class AzureOpenAiProvider
                 'date',
                 'total',
                 'amount',
-                'tax',
-                'vat',
                 'currency',
-                'line_items',
                 'mcc',
+                'line_items',
+                'vats',
                 'confidence',
                 'metadata',
             ];
@@ -290,7 +289,21 @@ class AzureOpenAiProvider
     {
         return match ($field) {
             'merchant', 'date', 'currency', 'mcc' => ['type' => ['string', 'null']],
-            'total', 'amount', 'tax', 'vat', 'confidence' => ['type' => ['number', 'null']],
+            'total', 'amount', 'confidence' => ['type' => ['number', 'null']],
+            'vats' => [
+                'type' => 'array',
+                'items' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'vat_rate' => ['type' => ['number', 'null']],
+                        'amount_excluding_vat' => ['type' => ['number', 'null']],
+                        'vat_amount' => ['type' => ['number', 'null']],
+                        'amount_including_vat' => ['type' => ['number', 'null']],
+                    ],
+                    'required' => ['vat_rate', 'amount_excluding_vat', 'vat_amount', 'amount_including_vat'],
+                    'additionalProperties' => false,
+                ],
+            ],
             'line_items' => [
                 'type' => 'array',
                 'items' => [
@@ -505,21 +518,100 @@ class AzureOpenAiProvider
         return trim($text);
     }
 
-    private function coerceReceiptFields(array $result, array $fields): array
+    private function normalizeReceipt(array $result, array $fields): array
     {
+        $result = $this->normalizeVatAliases($result);
+
         foreach ($fields as $field) {
             if (! array_key_exists($field, $result)) {
                 $result[$field] = $this->defaultValueForField($field);
             }
         }
 
+        if (in_array('vats', $fields, true)) {
+            $result['vats'] = $this->normalizeVats($result['vats'] ?? null, $result);
+            unset($result['tax'], $result['vat'], $result['tax_amount']);
+        }
+
         return $result;
+    }
+
+    private function normalizeVatAliases(array $result): array
+    {
+        if (! array_key_exists('vats', $result)) {
+            $legacy = [];
+
+            if (isset($result['vat']) || isset($result['tax']) || isset($result['tax_amount'])) {
+                $legacy[] = [
+                    'vat_rate' => $result['vat_rate'] ?? null,
+                    'amount_excluding_vat' => $result['amount_excluding_vat'] ?? $result['subtotal'] ?? null,
+                    'vat_amount' => $result['vat_amount'] ?? $result['tax_amount'] ?? $result['vat'] ?? $result['tax'] ?? null,
+                    'amount_including_vat' => $result['amount_including_vat'] ?? $result['total'] ?? $result['amount'] ?? null,
+                ];
+            }
+
+            if ($legacy !== []) {
+                $result['vats'] = $legacy;
+            }
+        }
+
+        return $result;
+    }
+
+    private function normalizeVats(mixed $vats, array $result): array
+    {
+        if (is_array($vats)) {
+            $normalized = [];
+
+            foreach ($vats as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+
+                $normalized[] = [
+                    'vat_rate' => $this->numericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
+                    'amount_excluding_vat' => $this->numericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['net'] ?? null),
+                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? $row['tax'] ?? null),
+                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['gross'] ?? $result['total'] ?? $result['amount'] ?? null),
+                ];
+            }
+
+            return $normalized;
+        }
+
+        if ($vats === null) {
+            return [];
+        }
+
+        return [[
+            'vat_rate' => $this->numericOrNull($result['vat_rate'] ?? null),
+            'amount_excluding_vat' => $this->numericOrNull($result['amount_excluding_vat'] ?? $result['subtotal'] ?? null),
+            'vat_amount' => $this->numericOrNull($vats),
+            'amount_including_vat' => $this->numericOrNull($result['amount_including_vat'] ?? $result['total'] ?? $result['amount'] ?? null),
+        ]];
+    }
+
+    private function numericOrNull(mixed $value): ?float
+    {
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+
+        if (is_string($value)) {
+            $value = trim(str_replace([' ', ','], ['', '.'], $value));
+
+            if ($value !== '' && is_numeric($value)) {
+                return (float) $value;
+            }
+        }
+
+        return null;
     }
 
     private function defaultValueForField(string $field): mixed
     {
         return match ($field) {
-            'line_items', 'metadata' => [],
+            'line_items', 'metadata', 'vats' => [],
             default => null,
         };
     }

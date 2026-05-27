@@ -257,21 +257,24 @@ class ReceiptPrompt
         }
 
         $fields = [];
+        $hasExplicitBooleanMap = false;
 
         foreach ($enabledFields as $key => $value) {
             if (is_string($key) && is_bool($value)) {
+                $hasExplicitBooleanMap = true;
                 if (! $value) {
                     continue;
                 }
 
                 $field = $key;
             } elseif (is_string($key) && is_scalar($value)) {
+                $hasExplicitBooleanMap = true;
                 if (! filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
                     continue;
                 }
 
                 $field = $key;
-            } elseif (is_string($value)) {
+            } elseif (is_int($key) && is_string($value)) {
                 $field = $value;
             } else {
                 continue;
@@ -282,6 +285,10 @@ class ReceiptPrompt
             if (in_array($field, self::FIELDS, true) && ! in_array($field, $fields, true)) {
                 $fields[] = $field;
             }
+        }
+
+        if ($fields === []) {
+            return self::FIELDS;
         }
 
         return array_values(array_filter(self::FIELDS, static fn (string $field): bool => in_array($field, $fields, true)));

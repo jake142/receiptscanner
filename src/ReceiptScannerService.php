@@ -353,8 +353,8 @@ class ReceiptScannerService
 
         $result['merchant'] = $this->normalizeMerchant($decoded['merchant'] ?? null);
         $result['receipt'] = $this->normalizeReceipt($decoded['receipt'] ?? null);
-        $result['totals'] = $this->normalizeTotals($decoded['totals'] ?? null);
-        $result['vats'] = $this->normalizeVats($decoded['vats'] ?? null);
+        $result['totals'] = $this->normalizeTotals($decoded['totals'] ?? null, $decoded);
+        $result['vats'] = $this->normalizeVats($decoded['vats'] ?? null, $decoded);
         $result['line_items'] = $this->normalizeLineItems($decoded['line_items'] ?? null);
         $result['payment'] = $this->normalizePayment($decoded['payment'] ?? null);
         $result['confidence'] = $this->normalizeNullableNumber($decoded['confidence'] ?? null);
@@ -420,35 +420,47 @@ class ReceiptScannerService
         ];
     }
 
-    private function normalizeTotals(mixed $value): array
+    private function normalizeTotals(mixed $value, array $decoded = []): array
     {
         $value = is_array($value) ? $value : [];
 
         return [
-            'amount_excluding_vat' => $this->normalizeNullableNumber($value['amount_excluding_vat'] ?? null),
-            'vat_amount' => $this->normalizeNullableNumber($value['vat_amount'] ?? null),
-            'amount_including_vat' => $this->normalizeNullableNumber($value['amount_including_vat'] ?? ($value['amount'] ?? null)),
+            'amount_excluding_vat' => $this->normalizeNullableNumber($value['amount_excluding_vat'] ?? $decoded['amount_excluding_vat'] ?? null),
+            'vat_amount' => $this->normalizeNullableNumber($value['vat_amount'] ?? $decoded['vat_amount'] ?? $decoded['tax_amount'] ?? null),
+            'amount_including_vat' => $this->normalizeNullableNumber($value['amount_including_vat'] ?? ($value['amount'] ?? ($decoded['amount'] ?? $decoded['total'] ?? null))),
             'rounding' => $this->normalizeNullableNumber($value['rounding'] ?? null),
         ];
     }
 
-    private function normalizeVats(mixed $value): array
+    private function normalizeVats(mixed $value, array $decoded = []): array
     {
-        if (! is_array($value)) {
-            return [];
+        $rows = is_array($value) ? $value : [];
+
+        if ($rows === []) {
+            $legacyVat = $decoded['vat'] ?? $decoded['tax'] ?? null;
+            if (is_array($legacyVat)) {
+                $rows = $legacyVat;
+            } elseif ($legacyVat !== null) {
+                $rows = [[
+                    'vat_rate' => $decoded['vat_rate'] ?? $decoded['tax_rate'] ?? null,
+                    'amount_excluding_vat' => $decoded['amount_excluding_vat'] ?? null,
+                    'vat_amount' => $legacyVat,
+                    'amount_including_vat' => $decoded['amount_including_vat'] ?? ($decoded['amount'] ?? null),
+                ]];
+            }
         }
 
         $normalized = [];
-        foreach ($value as $item) {
+        foreach ($rows as $item) {
             if (! is_array($item)) {
                 continue;
             }
 
             $normalized[] = [
-                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? null),
-                'amount_excluding_vat' => $this->normalizeNullableNumber($item['amount_excluding_vat'] ?? null),
-                'vat_amount' => $this->normalizeNullableNumber($item['vat_amount'] ?? null),
-                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? null),
+                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? $item['rate'] ?? null),
+                'amount_excluding_vat' => $this->normalizeNullableNumber($item['amount_excluding_vat'] ?? $item['net_amount'] ?? null),
+                'vat_amount' => $this->normalizeNullableNumber($item['vat_amount'] ?? $item['tax_amount'] ?? $item['vat'] ?? $item['tax'] ?? null),
+                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? $item['gross_amount'] ?? null),
             ];
         }
 

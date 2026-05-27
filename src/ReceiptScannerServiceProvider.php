@@ -1,8 +1,11 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Jake142\ReceiptScanner;
 
 use Illuminate\Support\ServiceProvider;
+use Jake142\ReceiptScanner\Facades\ReceiptScanner as ReceiptScannerFacade;
 use Jake142\ReceiptScanner\Providers\AnthropicProvider;
 use Jake142\ReceiptScanner\Providers\AzureOpenAiProvider;
 use Jake142\ReceiptScanner\Providers\GeminiProvider;
@@ -29,6 +32,7 @@ class ReceiptScannerServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(ReceiptScannerManager::class, 'receiptscanner');
+        $this->app->alias(ReceiptScannerManager::class, ReceiptScannerFacade::class);
     }
 
     public function boot(): void

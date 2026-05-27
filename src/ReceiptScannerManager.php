@@ -276,25 +276,56 @@ class ReceiptScannerManager
             $fields = [];
         }
 
-        $fields = array_values(array_unique(array_filter(array_map(
-            static fn ($field): string => is_string($field) ? trim($field) : '',
-            Arr::wrap($fields)
-        ))));
+        $normalized = [];
+        $hasUsableField = false;
+
+        foreach ($fields as $key => $value) {
+            if (is_int($key) && is_string($value)) {
+                $field = trim($value);
+                if ($field !== '') {
+                    $normalized[$field] = true;
+                    $hasUsableField = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_bool($value)) {
+                if ($value) {
+                    $normalized[trim($key)] = true;
+                    $hasUsableField = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_scalar($value)) {
+                if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                    $normalized[trim($key)] = true;
+                    $hasUsableField = true;
+                }
+            }
+        }
+
+        $fields = array_values(array_filter(array_map(
+            static fn (string $field): string => strtolower(trim($field)),
+            array_keys($normalized)
+        ), static fn (string $field): bool => $field !== ''));
 
         if ($fields !== []) {
+            return $fields;
+        }
+
+        if ($hasUsableField) {
             return $fields;
         }
 
         return [
             'merchant',
             'date',
-            'total',
             'amount',
-            'tax',
-            'vat',
             'currency',
-            'line_items',
             'mcc',
+            'line_items',
+            'vats',
             'confidence',
             'metadata',
         ];

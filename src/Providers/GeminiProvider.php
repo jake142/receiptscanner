@@ -80,7 +80,7 @@ class GeminiProvider
             throw new RuntimeException('Gemini receipt extraction failed: model output was not a JSON object.');
         }
 
-        return $decoded;
+        return $this->normalizeReceiptPayload($decoded, $fields);
     }
 
     /**
@@ -496,5 +496,93 @@ class GeminiProvider
         $message = preg_replace('/(x-goog-api-key|api-key|authorization)\s*[:=]\s*[^\s,}]+/i', '$1: [redacted]', $message) ?? $message;
 
         return mb_substr(trim($message), 0, 1000);
+    }
+
+    /**
+     * Normalize legacy receipt payloads into the canonical vats[] schema.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<int, string>  $fields
+     * @return array<string, mixed>
+     */
+    private function normalizeReceiptPayload(array $payload, array $fields): array
+    {
+        if (array_key_exists('tax', $payload) || array_key_exists('vat', $payload) || array_key_exists('tax_amount', $payload) || array_key_exists('vat_amount', $payload)) {
+            $payload['vats'] = $this->normalizeVats($payload);
+            unset($payload['tax'], $payload['vat'], $payload['tax_amount']);
+        }
+
+        if (in_array('vats', $fields, true) && ! array_key_exists('vats', $payload)) {
+            $payload['vats'] = [];
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeVats(array $payload): array
+    {
+        $rows = [];
+
+        $source = $payload['vats'] ?? null;
+        if (is_array($source)) {
+            foreach ($source as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+
+                $rows[] = $this->normalizeVatRow($row);
+            }
+        }
+
+        if ($rows !== []) {
+            return $rows;
+        }
+
+        $legacyRow = [
+            'vat_rate' => $payload['vat_rate'] ?? $payload['tax_rate'] ?? null,
+            'amount_excluding_vat' => $payload['amount_excluding_vat'] ?? $payload['subtotal'] ?? null,
+            'vat_amount' => $payload['vat_amount'] ?? $payload['tax_amount'] ?? $payload['tax'] ?? $payload['vat'] ?? null,
+            'amount_including_vat' => $payload['amount_including_vat'] ?? $payload['total'] ?? $payload['amount'] ?? null,
+        ];
+
+        if ($legacyRow['vat_rate'] !== null || $legacyRow['vat_amount'] !== null || $legacyRow['amount_excluding_vat'] !== null || $legacyRow['amount_including_vat'] !== null) {
+            return [$this->normalizeVatRow($legacyRow)];
+        }
+
+        return [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function normalizeVatRow(array $row): array
+    {
+        return [
+            'vat_rate' => $this->toNumericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
+            'amount_excluding_vat' => $this->toNumericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['net'] ?? null),
+            'vat_amount' => $this->toNumericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['tax'] ?? $row['vat'] ?? null),
+            'amount_including_vat' => $this->toNumericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['gross'] ?? null),
+        ];
+    }
+
+    private function toNumericOrNull(mixed $value): ?float
+    {
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+
+        if (is_string($value)) {
+            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
+            if ($normalized !== '' && is_numeric($normalized)) {
+                return (float) $normalized;
+            }
+        }
+
+        return null;
     }
 }
