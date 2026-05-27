@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Jake142\ReceiptScanner\Providers;
 
 use Illuminate\Http\Client\Response;
@@ -26,7 +28,7 @@ class OpenAiProvider
 
         $options = is_array($context['options'] ?? null) ? $context['options'] : [];
         $fields = $this->fieldsFromContext($context);
-        $model = (string) ($options['model'] ?? config('receiptscanner.providers.openai.model', 'gpt-4.1-mini'));
+        $model = (string) ($options['model'] ?? config('receiptscanner.providers.openai.model', 'gpt-5.4-nano'));
         $timeout = (int) ($options['timeout'] ?? config('receiptscanner.timeout', 60));
         $retries = (int) ($options['retries'] ?? config('receiptscanner.retries', 2));
         $baseUrl = rtrim((string) config('receiptscanner.providers.openai.base_url', 'https://api.openai.com/v1'), '/');
@@ -94,15 +96,12 @@ class OpenAiProvider
             $fields = [
                 'merchant',
                 'date',
-                'total',
                 'amount',
-                'tax',
-                'vat',
                 'currency',
+                'vat_amount',
                 'line_items',
                 'mcc',
-                'confidence',
-                'metadata',
+                'vats',
             ];
         }
 
@@ -122,7 +121,7 @@ class OpenAiProvider
         $content = [
             [
                 'type' => 'input_text',
-                'text' => $this->buildPrompt($fields),
+                'text' => $this->buildPrompt($fields, $context),
             ],
         ];
 
@@ -151,13 +150,20 @@ class OpenAiProvider
 
     /**
      * @param array<int, string> $fields
+     * @param array<string, mixed> $context
      */
-    private function buildPrompt(array $fields): string
+    private function buildPrompt(array $fields, array $context): string
     {
-        return 'Extract the receipt information from the attached receipt image(s) or PDF. '
-            . 'Return a single JSON object only, matching the provided JSON schema exactly. '
-            . 'Use null when a requested field is not visible or cannot be determined. '
-            . 'Do not invent values. Requested fields: ' . implode(', ', $fields) . '.';
+        $inputType = (string) ($context['input_type'] ?? 'images');
+        $isPdf = strtolower($inputType) === 'pdf';
+
+        return 'Extract receipt data from the attached ' . ($isPdf ? 'PDF' : 'image(s)') . '. '
+            . 'Analyze all provided pages/images together as one receipt and return a single JSON object only. '
+            . 'Use null for unknown scalar values and [] for unknown arrays. '
+            . 'Do not invent data. '
+            . 'Do not include any tax field; use vat_amount instead. '
+            . 'Include vats only when requested. '
+            . 'Requested fields: ' . implode(', ', $fields) . '.';
     }
 
     /**
@@ -294,32 +300,36 @@ class OpenAiProvider
         $knownProperties = [
             'merchant' => ['type' => ['string', 'null']],
             'date' => ['type' => ['string', 'null']],
-            'total' => ['type' => ['number', 'string', 'null']],
             'amount' => ['type' => ['number', 'string', 'null']],
-            'tax' => ['type' => ['number', 'string', 'null']],
-            'vat' => ['type' => ['number', 'string', 'null']],
             'currency' => ['type' => ['string', 'null']],
+            'vat_amount' => ['type' => ['number', 'string', 'null']],
             'line_items' => [
                 'type' => ['array', 'null'],
                 'items' => [
                     'type' => 'object',
                     'additionalProperties' => false,
                     'properties' => [
-                        'name' => ['type' => ['string', 'null']],
+                        'description' => ['type' => ['string', 'null']],
                         'quantity' => ['type' => ['number', 'string', 'null']],
                         'unit_price' => ['type' => ['number', 'string', 'null']],
-                        'total' => ['type' => ['number', 'string', 'null']],
-                        'category' => ['type' => ['string', 'null']],
+                        'amount' => ['type' => ['number', 'string', 'null']],
                     ],
-                    'required' => ['name', 'quantity', 'unit_price', 'total', 'category'],
+                    'required' => ['description', 'quantity', 'unit_price', 'amount'],
                 ],
             ],
             'mcc' => ['type' => ['string', 'null']],
-            'confidence' => ['type' => ['number', 'null'], 'minimum' => 0, 'maximum' => 1],
-            'metadata' => [
-                'type' => ['object', 'null'],
-                'additionalProperties' => [
-                    'type' => ['string', 'number', 'integer', 'boolean', 'null'],
+            'vats' => [
+                'type' => ['array', 'null'],
+                'items' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'vat_amount' => ['type' => ['number', 'string', 'null']],
+                        'vat_rate' => ['type' => ['number', 'string', 'null']],
+                        'amount_including_vat' => ['type' => ['number', 'string', 'null']],
+                        'amount_excluding_vat' => ['type' => ['number', 'string', 'null']],
+                    ],
+                    'required' => ['vat_amount', 'vat_rate', 'amount_including_vat', 'amount_excluding_vat'],
                 ],
             ],
         ];

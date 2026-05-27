@@ -28,10 +28,10 @@ class GeminiProvider
         }
 
         $options = is_array($context['options'] ?? null) ? $context['options'] : [];
-        $model = trim((string) ($options['model'] ?? config('receiptscanner.providers.gemini.model', 'gemini-2.5-flash')));
+        $model = trim((string) ($options['model'] ?? config('receiptscanner.providers.gemini.model', 'gemini-2.5-pro')));
 
         if ($model === '') {
-            $model = 'gemini-2.5-flash';
+            $model = 'gemini-2.5-pro';
         }
 
         $fields = $this->resolveFields($context, $options);
@@ -96,15 +96,12 @@ class GeminiProvider
             $fields = [
                 'merchant',
                 'date',
-                'total',
                 'amount',
-                'tax',
-                'vat',
                 'currency',
+                'vat_amount',
                 'line_items',
                 'mcc',
-                'confidence',
-                'metadata',
+                'vats',
             ];
         }
 
@@ -142,7 +139,7 @@ class GeminiProvider
 
         $parts = [
             [
-                'text' => $this->buildPrompt($fields),
+                'text' => $this->buildPrompt($fields, count($paths)),
             ],
         ];
 
@@ -173,14 +170,17 @@ class GeminiProvider
     /**
      * @param  array<int, string>  $fields
      */
-    private function buildPrompt(array $fields): string
+    private function buildPrompt(array $fields, int $inputCount): string
     {
         return implode("\n", [
-            'Extract the receipt data from the attached image or PDF.',
+            'Extract the receipt data from the attached image(s) or PDF.',
+            'Analyze all provided inputs together as one receipt. If multiple images are provided, merge them in order from top to bottom and do not duplicate line items.',
             'Return only one valid JSON object. Do not wrap it in Markdown and do not include explanatory text.',
             'Use these top-level fields exactly: '.json_encode($fields, JSON_UNESCAPED_SLASHES).'.',
-            'Use null for missing scalar values. Use an empty array for line_items when no line items are visible.',
+            'Use null for missing scalar values. Use an empty array for line_items and vats when no items are visible.',
             'Preserve numeric values as numbers when possible. Use ISO-4217 currency codes when visible.',
+            'The mcc field is a best-effort estimate only and may be null if uncertain.',
+            'Input count: '.$inputCount,
         ]);
     }
 
@@ -234,7 +234,7 @@ class GeminiProvider
     private function schemaForField(string $field): array
     {
         return match ($field) {
-            'total', 'amount', 'tax', 'vat', 'confidence' => [
+            'amount', 'vat_amount' => [
                 'type' => 'NUMBER',
                 'nullable' => true,
             ],
@@ -243,22 +243,23 @@ class GeminiProvider
                 'items' => [
                     'type' => 'OBJECT',
                     'properties' => [
-                        'name' => ['type' => 'STRING', 'nullable' => true],
+                        'description' => ['type' => 'STRING', 'nullable' => true],
                         'quantity' => ['type' => 'NUMBER', 'nullable' => true],
                         'unit_price' => ['type' => 'NUMBER', 'nullable' => true],
-                        'total' => ['type' => 'NUMBER', 'nullable' => true],
                         'amount' => ['type' => 'NUMBER', 'nullable' => true],
-                        'category' => ['type' => 'STRING', 'nullable' => true],
                     ],
                 ],
             ],
-            'metadata' => [
-                'type' => 'OBJECT',
-                'nullable' => true,
-                'properties' => [
-                    'notes' => ['type' => 'STRING', 'nullable' => true],
-                    'receipt_number' => ['type' => 'STRING', 'nullable' => true],
-                    'payment_method' => ['type' => 'STRING', 'nullable' => true],
+            'vats' => [
+                'type' => 'ARRAY',
+                'items' => [
+                    'type' => 'OBJECT',
+                    'properties' => [
+                        'vat_amount' => ['type' => 'NUMBER', 'nullable' => true],
+                        'vat_rate' => ['type' => 'NUMBER', 'nullable' => true],
+                        'amount_including_vat' => ['type' => 'NUMBER', 'nullable' => true],
+                        'amount_excluding_vat' => ['type' => 'NUMBER', 'nullable' => true],
+                    ],
                 ],
             ],
             default => [

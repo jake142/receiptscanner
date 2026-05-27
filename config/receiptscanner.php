@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 return [
     /*
     |--------------------------------------------------------------------------
@@ -45,21 +47,21 @@ return [
     'providers' => [
         'openai' => [
             'api_key' => env('OPENAI_API_KEY'),
-            'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
+            'model' => env('OPENAI_MODEL', 'gpt-5.4-nano'),
             'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
         ],
 
         'azure_openai' => [
             'endpoint' => env('AZURE_OPENAI_ENDPOINT'),
             'api_key' => env('AZURE_OPENAI_API_KEY'),
-            'deployment' => env('AZURE_OPENAI_DEPLOYMENT'),
+            'deployment' => env('AZURE_OPENAI_DEPLOYMENT', 'gpt-5.4-nano'),
             'api_version' => env('AZURE_OPENAI_API_VERSION'),
             'endpoint_mode' => env('AZURE_OPENAI_ENDPOINT_MODE', 'v1'),
         ],
 
         'gemini' => [
             'api_key' => env('GEMINI_API_KEY'),
-            'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
+            'model' => env('GEMINI_MODEL', 'gemini-2.5-pro'),
             'base_url' => env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'),
         ],
 
@@ -85,6 +87,8 @@ return [
 
     'retries' => (int) env('RECEIPTSCANNER_RETRIES', 2),
 
+    'max_file_size_mb' => (int) env('RECEIPTSCANNER_MAX_FILE_SIZE_MB', 32),
+
     /*
     |--------------------------------------------------------------------------
     | Receipt Fields
@@ -98,16 +102,15 @@ return [
     'fields' => [
         'merchant',
         'date',
-        'total',
         'amount',
-        'tax',
-        'vat',
         'currency',
+        'vat_amount',
         'line_items',
         'mcc',
-        'confidence',
-        'metadata',
+        'vats',
     ],
+
+    'include_vats' => env('RECEIPTSCANNER_INCLUDE_VATS', true),
 
     /*
     |--------------------------------------------------------------------------

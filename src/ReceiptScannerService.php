@@ -317,7 +317,6 @@ class ReceiptScannerService
                     return $decoded;
                 }
             } catch (JsonException) {
-                // Try the next conservative candidate, then allow the caller to perform one repair request.
             }
         }
 
