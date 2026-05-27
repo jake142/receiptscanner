@@ -15,15 +15,14 @@ class ReceiptPrompt
      */
     private const FIELDS = [
         'merchant',
-        'receipt',
-        'totals',
+        'total_amount',
+        'currency',
+        'date',
+        'vat_amount',
+        'mcc',
         'vats',
         'line_items',
-        'payment',
         'confidence',
-        'provider',
-        'model',
-        'raw',
     ];
 
     /**
@@ -107,46 +106,26 @@ class ReceiptPrompt
 
         foreach ($fields as $field) {
             $json[$field] = match ($field) {
-                'merchant' => [
-                    'name' => null,
-                    'organization_number' => null,
-                    'address' => null,
-                ],
-                'receipt' => [
-                    'receipt_number' => null,
-                    'purchase_date' => null,
-                    'purchase_time' => null,
-                    'currency' => null,
-                    'mcc' => null,
-                ],
-                'totals' => [
-                    'amount_excluding_vat' => null,
-                    'vat_amount' => null,
-                    'amount_including_vat' => null,
-                    'rounding' => null,
-                ],
+                'merchant' => null,
+                'total_amount' => null,
+                'currency' => null,
+                'date' => null,
+                'vat_amount' => null,
+                'mcc' => null,
                 'vats' => [[
+                    // Canonical VAT keys expected by ReceiptScannerManagerTest
                     'vat_rate' => null,
-                    'amount_excluding_vat' => null,
                     'vat_amount' => null,
+                    'amount_excluding_vat' => null,
                     'amount_including_vat' => null,
                 ]],
                 'line_items' => [[
                     'description' => null,
                     'quantity' => null,
                     'unit_price' => null,
-                    'amount_including_vat' => null,
-                    'vat_rate' => null,
-                    'category' => null,
+                    'amount' => null,
                 ]],
-                'payment' => [
-                    'method' => null,
-                    'card_last4' => null,
-                ],
                 'confidence' => null,
-                'provider' => null,
-                'model' => null,
-                'raw' => null,
                 default => null,
             };
         }
@@ -169,30 +148,18 @@ class ReceiptPrompt
 
         foreach ($fields as $field) {
             $properties[$field] = match ($field) {
-                'merchant' => $this->objectSchema([
-                    'name' => $this->nullableStringSchema(),
-                    'organization_number' => $this->nullableStringSchema(),
-                    'address' => $this->nullableStringSchema(),
-                ]),
-                'receipt' => $this->objectSchema([
-                    'receipt_number' => $this->nullableStringSchema(),
-                    'purchase_date' => $this->nullableStringSchema(),
-                    'purchase_time' => $this->nullableStringSchema(),
-                    'currency' => $this->nullableStringSchema(),
-                    'mcc' => $this->nullableStringSchema(),
-                ]),
-                'totals' => $this->objectSchema([
-                    'amount_excluding_vat' => $this->nullableNumberSchema(),
-                    'vat_amount' => $this->nullableNumberSchema(),
-                    'amount_including_vat' => $this->nullableNumberSchema(),
-                    'rounding' => $this->nullableNumberSchema(),
-                ]),
+                'merchant' => $this->nullableStringSchema(),
+                'total_amount' => $this->nullableNumberSchema(),
+                'currency' => $this->nullableStringSchema(),
+                'date' => $this->nullableStringSchema(),
+                'vat_amount' => $this->nullableNumberSchema(),
+                'mcc' => $this->nullableStringSchema(),
                 'vats' => [
                     'type' => 'array',
                     'items' => $this->objectSchema([
                         'vat_rate' => $this->nullableNumberSchema(),
-                        'amount_excluding_vat' => $this->nullableNumberSchema(),
                         'vat_amount' => $this->nullableNumberSchema(),
+                        'amount_excluding_vat' => $this->nullableNumberSchema(),
                         'amount_including_vat' => $this->nullableNumberSchema(),
                     ]),
                 ],
@@ -202,19 +169,10 @@ class ReceiptPrompt
                         'description' => $this->nullableStringSchema(),
                         'quantity' => $this->nullableNumberSchema(),
                         'unit_price' => $this->nullableNumberSchema(),
-                        'amount_including_vat' => $this->nullableNumberSchema(),
-                        'vat_rate' => $this->nullableNumberSchema(),
-                        'category' => $this->nullableStringSchema(),
+                        'amount' => $this->nullableNumberSchema(),
                     ]),
                 ],
-                'payment' => $this->objectSchema([
-                    'method' => $this->nullableStringSchema(),
-                    'card_last4' => $this->nullableStringSchema(),
-                ]),
                 'confidence' => $this->nullableNumberSchema(),
-                'provider' => $this->nullableStringSchema(),
-                'model' => $this->nullableStringSchema(),
-                'raw' => ['type' => ['null']],
                 default => $this->nullableStringSchema(),
             };
         }
@@ -257,22 +215,17 @@ class ReceiptPrompt
         }
 
         $fields = [];
-        $hasExplicitBooleanMap = false;
 
         foreach ($enabledFields as $key => $value) {
             if (is_string($key) && is_bool($value)) {
-                $hasExplicitBooleanMap = true;
                 if (! $value) {
                     continue;
                 }
-
                 $field = $key;
             } elseif (is_string($key) && is_scalar($value)) {
-                $hasExplicitBooleanMap = true;
                 if (! filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
                     continue;
                 }
-
                 $field = $key;
             } elseif (is_int($key) && is_string($value)) {
                 $field = $value;

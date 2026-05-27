@@ -21,7 +21,6 @@ class AzureOpenAiProviderTest extends TestCase
 
         $this->assertInstanceOf(ReceiptScannerManager::class, $manager);
         $this->assertSame('azure_openai', config('receiptscanner.provider'));
-        $this->assertSame('azure_openai', config('receiptscanner.provider'));
         $this->assertSame('gpt-5.4-nano', config('receiptscanner.providers.azure_openai.deployment'));
     }
 }

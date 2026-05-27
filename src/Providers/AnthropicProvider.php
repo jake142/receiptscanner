@@ -7,7 +7,7 @@ namespace Jake142\ReceiptScanner\Providers;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use RuntimeException;
+use Jake142\ReceiptScanner\Exceptions\ReceiptScannerException;
 use Throwable;
 
 class AnthropicProvider
@@ -25,7 +25,7 @@ class AnthropicProvider
         $apiKey = trim((string) config('receiptscanner.providers.anthropic.api_key', ''));
 
         if ($apiKey === '') {
-            throw new RuntimeException('Anthropic API key is not configured. Set ANTHROPIC_API_KEY or receiptscanner.providers.anthropic.api_key.');
+            throw new ReceiptScannerException('Anthropic API key is not configured. Set ANTHROPIC_API_KEY or receiptscanner.providers.anthropic.api_key.');
         }
 
         $options = is_array($context['options'] ?? null) ? $context['options'] : [];
@@ -50,6 +50,8 @@ class AnthropicProvider
             $headers['anthropic-beta'] = self::PDF_BETA;
         }
 
+        $start = microtime(true);
+
         try {
             $request = Http::withHeaders($headers)
                 ->acceptJson()
@@ -64,23 +66,24 @@ class AnthropicProvider
         } catch (Throwable $exception) {
             $this->logDiagnostic('Anthropic receipt extraction transport error', [
                 'provider' => 'anthropic',
-                'endpoint_mode' => null,
-                'status' => null,
-                'request_id' => null,
-                'message' => $this->safeExcerpt($exception->getMessage()),
+                'model' => $model,
+                'mime_type' => $context['mime_type'] ?? null,
+                'retry_count' => $retries,
+                'duration_ms' => (int) ((microtime(true) - $start) * 1000),
+                'failure_category' => 'transport',
             ]);
 
-            throw new RuntimeException('Anthropic receipt extraction request failed: '.$exception->getMessage(), 0, $exception);
+            throw new ReceiptScannerException('Anthropic receipt extraction request failed: '.$exception->getMessage(), 0, $exception);
         }
 
         if ($response->failed()) {
-            $this->throwProviderHttpError($response);
+            $this->throwProviderHttpError($response, $model, $context['mime_type'] ?? null, $retries, $start);
         }
 
         $body = $response->json();
 
         if (! is_array($body)) {
-            throw new RuntimeException('Anthropic receipt extraction returned a non-JSON response.');
+            throw new ReceiptScannerException('Anthropic receipt extraction returned a non-JSON response.');
         }
 
         $toolInput = $this->extractToolInput($body);
@@ -92,7 +95,7 @@ class AnthropicProvider
         $text = $this->extractText($body);
 
         if ($text === null) {
-            throw new RuntimeException('Anthropic receipt extraction response did not contain tool input or text output.');
+            throw new ReceiptScannerException('Anthropic receipt extraction response did not contain tool input or text output.');
         }
 
         return $this->normalizeReceipt($this->decodeJsonObject($text));
@@ -154,12 +157,12 @@ class AnthropicProvider
 
     private function systemPrompt(): string
     {
-        return 'You are a precise receipt extraction engine. Extract only information present in the supplied receipt image or PDF. Use null when a requested scalar value is unknown, use an empty array when no line items are visible, and do not invent merchants, dates, currencies, totals, tax values, VAT values, MCCs, confidence scores, or metadata. Always return VAT breakdown as vats[] rows with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
+        return 'You are a precise receipt extraction engine. Analyze all supplied receipt images together as one receipt, especially when the receipt is split across multiple photos. Extract only information present in the supplied receipt image or PDF. Use null when a requested scalar value is unknown, use an empty array when no line items are visible, and do not invent merchants, dates, currencies, totals, tax values, VAT values, MCCs, confidence scores, or metadata. Always return VAT breakdown as vats[] rows with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
     }
 
     private function userPrompt(array $fields): string
     {
-        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. Return values for these package fields exactly when requested: '.implode(', ', $fields).'. Preserve the package schema: merchant, date, total, amount, currency, line_items, mcc, confidence, metadata, and vats. Do not return legacy tax or vat scalar fields when vats is requested. Dates should be ISO-8601 when the receipt provides enough information. Currency should be an ISO-4217 code when it can be inferred from the receipt. Line items should be an array of objects.';
+        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. Analyze all provided images as one combined receipt. Return values for these package fields exactly when requested: '.implode(', ', $fields).'. Preserve the package schema: merchant, date, total, amount, currency, line_items, mcc, confidence, metadata, and vats. Do not return legacy tax or vat scalar fields when vats is requested. Dates should be ISO-8601 when the receipt provides enough information. Currency should be an ISO-4217 code when it can be inferred from the receipt. Line items should be an array of objects.';
     }
 
     private function toolInputSchema(array $fields): array
@@ -254,13 +257,13 @@ class AnthropicProvider
     private function fileBlock(string $path, array $context): array
     {
         if (! is_file($path) || ! is_readable($path)) {
-            throw new RuntimeException("Receipt input file is not readable: {$path}");
+            throw new ReceiptScannerException("Receipt input file is not readable: {$path}");
         }
 
         $contents = file_get_contents($path);
 
         if ($contents === false) {
-            throw new RuntimeException("Unable to read receipt input file: {$path}");
+            throw new ReceiptScannerException("Unable to read receipt input file: {$path}");
         }
 
         $mimeType = $this->mimeType($path, $context);
@@ -281,7 +284,7 @@ class AnthropicProvider
             $mimeType = $mimeType === 'image/jpg' ? 'image/jpeg' : $mimeType;
 
             if (! in_array($mimeType, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) {
-                throw new RuntimeException("Anthropic receipt extraction does not support image MIME type {$mimeType}.");
+                throw new ReceiptScannerException("Anthropic receipt extraction does not support image MIME type {$mimeType}.");
             }
 
             return [
@@ -294,7 +297,7 @@ class AnthropicProvider
             ];
         }
 
-        throw new RuntimeException("Anthropic receipt extraction supports receipt images and PDFs only; detected {$mimeType}.");
+        throw new ReceiptScannerException("Anthropic receipt extraction supports receipt images and PDFs only; detected {$mimeType}.");
     }
 
     private function paths(array $context): array
@@ -306,13 +309,13 @@ class AnthropicProvider
         }
 
         if (! is_array($paths)) {
-            throw new RuntimeException('Receipt scan context must include one or more input paths.');
+            throw new ReceiptScannerException('Receipt scan context must include one or more input paths.');
         }
 
         $paths = array_values(array_filter($paths, static fn ($path): bool => is_string($path) && trim($path) !== ''));
 
         if ($paths === []) {
-            throw new RuntimeException('Receipt scan context must include one or more input paths.');
+            throw new ReceiptScannerException('Receipt scan context must include one or more input paths.');
         }
 
         return $paths;
@@ -475,7 +478,7 @@ class AnthropicProvider
             }
         }
 
-        throw new RuntimeException('Anthropic receipt extraction response did not contain a valid JSON object.');
+        throw new ReceiptScannerException('Anthropic receipt extraction response did not contain a valid JSON object.');
     }
 
     private function normalizeReceipt(array $payload): array
@@ -540,21 +543,22 @@ class AnthropicProvider
         return null;
     }
 
-    private function throwProviderHttpError(Response $response): never
+    private function throwProviderHttpError(Response $response, string $model, mixed $mimeType, int $retries, float $start): never
     {
         $requestId = $this->requestId($response);
         $message = $this->providerErrorMessage($response);
-        $diagnostic = [
+        $failureCategory = $response->status() >= 500 ? 'upstream_5xx' : ($response->status() === 429 ? 'rate_limited' : 'http_error');
+
+        $this->logDiagnostic('Anthropic receipt extraction HTTP error', [
             'provider' => 'anthropic',
-            'endpoint_mode' => null,
-            'status' => $response->status(),
-            'request_id' => $requestId,
-            'message' => $message,
-        ];
+            'model' => $model,
+            'mime_type' => is_string($mimeType) ? $mimeType : null,
+            'retry_count' => $retries,
+            'duration_ms' => (int) ((microtime(true) - $start) * 1000),
+            'failure_category' => $failureCategory,
+        ]);
 
-        $this->logDiagnostic('Anthropic receipt extraction HTTP error', $diagnostic);
-
-        throw new RuntimeException('Anthropic receipt extraction failed with HTTP '.$response->status().($requestId ? " (request_id {$requestId})" : '').': '.$message);
+        throw new ReceiptScannerException('Anthropic receipt extraction failed with HTTP '.$response->status().($requestId ? " (request_id {$requestId})" : '').': '.$message);
     }
 
     private function providerErrorMessage(Response $response): string

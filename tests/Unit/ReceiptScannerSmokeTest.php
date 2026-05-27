@@ -18,6 +18,6 @@ class ReceiptScannerSmokeTest extends TestCase
 
     public function test_config_exposes_default_provider_key(): void
     {
-        $this->assertSame('openai', config('receiptscanner.provider'));
+        $this->assertSame('openai', config('receiptscanner.default_provider'));
     }
 }

@@ -5,28 +5,23 @@ declare(strict_types=1);
 return [
     /*
     |--------------------------------------------------------------------------
-    | Default Provider / Model
+    | ReceiptScanner Configuration
     |--------------------------------------------------------------------------
     |
+    | Configure the default AI provider and model used by the facade/service.
     | Supported providers:
     | - openai
     | - azure_openai
     | - gemini
     | - anthropic
     |
-    | The facade/service will read these values from config, which in turn
-    | reads from env.
+    | The package reads provider/model values from env via this config file.
+    | Default models are modern multimodal models, with OpenAI/Azure OpenAI
+    | using gpt-5.4-nano by default.
     |
     */
 
-    // Canonical key used by the manager/tests.
     'default_provider' => env('RECEIPTSCANNER_PROVIDER', 'openai'),
-
-    // Backward-compatible key (some hosts may still reference receiptscanner.provider).
-    // Keep it in sync with the canonical key.
-    'provider' => env('RECEIPTSCANNER_PROVIDER', env('RECEIPTSCANNER_PROVIDER', 'openai')),
-
-    'model' => env('RECEIPTSCANNER_MODEL', null),
 
     /*
     |--------------------------------------------------------------------------
@@ -50,7 +45,7 @@ return [
         ],
 
         'gemini' => [
-            'api_key' => env('GOOGLE_API_KEY', env('GEMINI_API_KEY')),
+            'api_key' => env('GEMINI_API_KEY', env('GOOGLE_API_KEY')),
             'base_url' => env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'),
             'model' => env('GEMINI_MODEL', 'gemini-2.5-pro'),
         ],
