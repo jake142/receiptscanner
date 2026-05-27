@@ -55,17 +55,13 @@ class AzureOpenAiProvider
 
     private function endpointMode(array $config): string
     {
-        $mode = strtolower(trim((string) ($config['endpoint_mode'] ?? 'v1')));
+        $apiVersion = trim((string) ($config['api_version'] ?? ''));
 
-        if ($mode === '') {
+        if ($apiVersion === '' || $apiVersion === 'v1') {
             return 'v1';
         }
 
-        if (! in_array($mode, ['v1', 'legacy'], true)) {
-            throw new InvalidArgumentException('Invalid Azure OpenAI endpoint_mode. Supported values are v1 and legacy.');
-        }
-
-        return $mode;
+        return 'legacy';
     }
 
     private function resolveDeployment(array $context, array $config): string
