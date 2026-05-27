@@ -1,43 +1,44 @@
 {
-  "name": "jake142/receiptscanner",
-  "description": "A Laravel package that wraps upstream multimodal LLM providers to parse receipt images and PDFs into structured receipt JSON.",
-  "type": "library",
-  "license": "MIT",
-  "require": {
-    "php": "^8.3",
-    "illuminate/support": "^11.0|^12.0|^13.0",
-    "illuminate/http": "^11.0|^12.0|^13.0"
-  },
-  "require-dev": {
-    "phpunit/phpunit": "^11.0|^12.0",
-    "orchestra/testbench": "^9.0|^10.0|^11.0"
-  },
-  "autoload": {
-    "psr-4": {
-      "Jake142\\ReceiptScanner\\": "src/"
-    }
-  },
-  "autoload-dev": {
-    "psr-4": {
-      "Jake142\\ReceiptScanner\\Tests\\": "tests/"
-    }
-  },
-  "extra": {
-    "laravel": {
-      "providers": [
-        "Jake142\\ReceiptScanner\\ReceiptScannerServiceProvider"
-      ],
-      "aliases": {
-        "ReceiptScanner": "Jake142\\ReceiptScanner\\Facades\\ReceiptScanner"
-      }
-    }
-  },
-  "minimum-stability": "stable",
-  "prefer-stable": true,
-  "config": {
-    "platform": {
-      "php": "8.3.0"
+    "name": "jake142/receiptscanner",
+    "description": "A Laravel package that wraps upstream multimodal LLM providers to parse receipt images and PDFs into structured receipt JSON.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0"
     },
-    "sort-packages": true
-  }
+    "require-dev": {
+        "phpunit/phpunit": "^11.0|^12.0",
+        "orchestra/testbench": "^9.0|^10.0|^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Jake142\\ReceiptScanner\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Jake142\\ReceiptScanner\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Jake142\\ReceiptScanner\\ReceiptScannerServiceProvider"
+            ],
+            "aliases": {
+                "ReceiptScanner": "Jake142\\ReceiptScanner\\Facades\\ReceiptScanner"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "config": {
+        "platform": {
+            "php": "8.3.0"
+        },
+        "sort-packages": true
+    },
+    "version": "0.1.1"
 }
