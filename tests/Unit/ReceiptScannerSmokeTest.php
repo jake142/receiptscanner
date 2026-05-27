@@ -7,7 +7,7 @@ namespace Jake142\ReceiptScanner\Tests\Unit;
 use Jake142\ReceiptScanner\ReceiptScannerManager;
 use Jake142\ReceiptScanner\Tests\TestCase;
 
-final class ReceiptScannerSmokeTest extends TestCase
+class ReceiptScannerSmokeTest extends TestCase
 {
     public function test_package_boots(): void
     {

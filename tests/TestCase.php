@@ -23,10 +23,6 @@ abstract class TestCase extends Orchestra
         $app['config']->set('receiptscanner.api_keys.openai', 'test-api-key');
         $app['config']->set('receiptscanner.providers.azure_openai.api_key', 'test-api-key');
         $app['config']->set('receiptscanner.api_keys.azure_openai', 'test-api-key');
-        $app['config']->set('receiptscanner.providers.gemini.api_key', 'test-api-key');
-        $app['config']->set('receiptscanner.api_keys.gemini', 'test-api-key');
-        $app['config']->set('receiptscanner.providers.anthropic.api_key', 'test-api-key');
-        $app['config']->set('receiptscanner.api_keys.anthropic', 'test-api-key');
     }
 
     protected function setUp(): void
