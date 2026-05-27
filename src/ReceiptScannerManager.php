@@ -1,74 +1,293 @@
 <?php
 
-declare(strict_types=1);
-
 namespace Jake142\ReceiptScanner;
 
+use Illuminate\Support\Arr;
+use InvalidArgumentException;
+use Jake142\ReceiptScanner\Providers\AnthropicProvider;
 use Jake142\ReceiptScanner\Providers\AzureOpenAiProvider;
+use Jake142\ReceiptScanner\Providers\GeminiProvider;
 use Jake142\ReceiptScanner\Providers\OpenAiProvider;
 use RuntimeException;
 
 class ReceiptScannerManager
 {
     public function __construct(
-        private readonly OpenAiProvider $openAiProvider,
-        private readonly AzureOpenAiProvider $azureOpenAiProvider,
+        private ?OpenAiProvider $openAiProvider = null,
+        private ?AzureOpenAiProvider $azureOpenAiProvider = null,
+        private ?GeminiProvider $geminiProvider = null,
+        private ?AnthropicProvider $anthropicProvider = null,
     ) {
+        $this->openAiProvider ??= new OpenAiProvider();
+        $this->azureOpenAiProvider ??= new AzureOpenAiProvider();
+        $this->geminiProvider ??= new GeminiProvider();
+        $this->anthropicProvider ??= new AnthropicProvider();
     }
 
     /**
      * Scan a receipt image or PDF and return structured receipt data.
      *
-     * @param string $pathOrContents
+     * The input type is detected from an explicit mime_type option, the local
+     * file MIME type when available, or the path extension. PDFs are delegated
+     * to scanPdf(); all other supported receipt inputs are delegated to
+     * scanImages().
+     *
      * @param array<string, mixed> $options
      * @return array<string, mixed>
      */
-    public function scan(string $pathOrContents, array $options = []): array
+    public function scan(string $path, array $options = []): array
     {
-        $context = $this->buildProviderContext($pathOrContents, $options);
-        $provider = $this->resolveProvider($options);
+        $path = $this->normalizePath($path);
 
-        return $provider->extract($context);
+        if ($this->isPdfPath($path, $options)) {
+            return $this->scanPdf($path, $options);
+        }
+
+        return $this->scanImages([$path], $options);
     }
 
     /**
-     * @param string $pathOrContents
+     * Scan one or more receipt image paths and return structured receipt data.
+     *
+     * @param string|array<int, string> $paths
      * @param array<string, mixed> $options
      * @return array<string, mixed>
      */
-    private function buildProviderContext(string $pathOrContents, array $options): array
+    public function scanImages(string|array $paths, array $options = []): array
     {
-        $context = [
-            'path' => $pathOrContents,
+        $normalizedPaths = $this->normalizePaths($paths);
+
+        $context = $this->buildContext('image', $normalizedPaths, $options);
+
+        return $this->extractWithSelectedProvider($context, $options);
+    }
+
+    /**
+     * Scan a receipt PDF path and return structured receipt data.
+     *
+     * @param array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    public function scanPdf(string $path, array $options = []): array
+    {
+        $normalizedPath = $this->normalizePath($path);
+
+        $context = $this->buildContext('pdf', [$normalizedPath], $options);
+
+        return $this->extractWithSelectedProvider($context, $options);
+    }
+
+    /**
+     * @param array<int, string> $paths
+     * @param array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    private function buildContext(string $inputType, array $paths, array $options): array
+    {
+        return [
+            'input_type' => $inputType,
+            'paths' => $paths,
+            'mime_type' => $this->mimeTypeForContext($inputType, $paths, $options),
             'options' => $options,
+            'fields' => $this->fieldsFromOptions($options),
         ];
+    }
 
-        if (is_file($pathOrContents) && is_readable($pathOrContents)) {
-            $contents = file_get_contents($pathOrContents);
+    /**
+     * @param array<string, mixed> $context
+     * @param array<string, mixed> $options
+     * @return array<string, mixed>
+     */
+    private function extractWithSelectedProvider(array $context, array $options): array
+    {
+        $provider = $this->providerForSlug($this->providerSlug($options));
 
-            if ($contents !== false) {
-                $context['contents'] = $contents;
+        if (! method_exists($provider, 'extract')) {
+            throw new RuntimeException('Configured receipt scanner provider does not expose an extract method.');
+        }
+
+        /** @var array<string, mixed> $result */
+        $result = $provider->extract($context);
+
+        return $result;
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private function providerSlug(array $options): string
+    {
+        $provider = $options['provider'] ?? config('receiptscanner.default_provider', 'openai');
+
+        if (! is_string($provider) || trim($provider) === '') {
+            throw new InvalidArgumentException('ReceiptScanner provider must be a non-empty string.');
+        }
+
+        return strtolower(trim($provider));
+    }
+
+    private function providerForSlug(string $slug): object
+    {
+        return match ($slug) {
+            'openai' => $this->openAiProvider,
+            'azure_openai' => $this->azureOpenAiProvider,
+            'gemini' => $this->geminiProvider,
+            'anthropic' => $this->anthropicProvider,
+            default => throw new InvalidArgumentException(sprintf(
+                'Unsupported ReceiptScanner provider [%s]. Supported providers are openai, azure_openai, gemini, and anthropic.',
+                $slug
+            )),
+        };
+    }
+
+    /**
+     * @param string|array<int, string> $paths
+     * @return array<int, string>
+     */
+    private function normalizePaths(string|array $paths): array
+    {
+        if (is_string($paths)) {
+            $paths = [$paths];
+        }
+
+        $normalized = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path)) {
+                throw new InvalidArgumentException('Receipt image paths must be strings.');
+            }
+
+            $normalized[] = $this->normalizePath($path);
+        }
+
+        if ($normalized === []) {
+            throw new InvalidArgumentException('At least one receipt image path is required.');
+        }
+
+        return $normalized;
+    }
+
+    private function normalizePath(string $path): string
+    {
+        $path = trim($path);
+
+        if ($path === '') {
+            throw new InvalidArgumentException('Receipt path must be a non-empty string.');
+        }
+
+        return $path;
+    }
+
+    /**
+     * @param array<string, mixed> $options
+     */
+    private function isPdfPath(string $path, array $options): bool
+    {
+        $mimeType = $options['mime_type'] ?? null;
+
+        if (is_string($mimeType) && trim($mimeType) !== '') {
+            return strtolower(trim($mimeType)) === 'application/pdf';
+        }
+
+        if (is_file($path)) {
+            $detected = @mime_content_type($path);
+
+            if (is_string($detected) && trim($detected) !== '') {
+                return strtolower(trim($detected)) === 'application/pdf';
             }
         }
 
-        return $context;
+        return strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'pdf';
+    }
+
+    /**
+     * @param array<int, string> $paths
+     * @param array<string, mixed> $options
+     * @return string|array<int, string>|null
+     */
+    private function mimeTypeForContext(string $inputType, array $paths, array $options): string|array|null
+    {
+        $mimeType = $options['mime_type'] ?? null;
+
+        if (is_string($mimeType) && trim($mimeType) !== '') {
+            return strtolower(trim($mimeType));
+        }
+
+        if (is_array($mimeType)) {
+            return array_values(array_map(
+                static fn ($value): string => is_string($value) ? strtolower(trim($value)) : '',
+                $mimeType
+            ));
+        }
+
+        if ($inputType === 'pdf') {
+            return 'application/pdf';
+        }
+
+        if (count($paths) === 1) {
+            return $this->mimeTypeForPath($paths[0]);
+        }
+
+        return array_map(fn (string $path): string => $this->mimeTypeForPath($path), $paths);
+    }
+
+    private function mimeTypeForPath(string $path): string
+    {
+        if (is_file($path)) {
+            $detected = @mime_content_type($path);
+
+            if (is_string($detected) && trim($detected) !== '') {
+                return strtolower(trim($detected));
+            }
+        }
+
+        return match (strtolower(pathinfo($path, PATHINFO_EXTENSION))) {
+            'pdf' => 'application/pdf',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'gif' => 'image/gif',
+            'jpg', 'jpeg' => 'image/jpeg',
+            default => 'application/octet-stream',
+        };
     }
 
     /**
      * @param array<string, mixed> $options
+     * @return array<int, string>
      */
-    private function resolveProvider(array $options): OpenAiProvider|AzureOpenAiProvider
+    private function fieldsFromOptions(array $options): array
     {
-        $provider = $options['provider'] ?? config('receiptscanner.provider', config('receiptscanner.default', 'openai'));
+        $fields = $options['fields'] ?? config('receiptscanner.fields', []);
 
-        if (! is_string($provider)) {
-            throw new RuntimeException('ReceiptScanner provider is invalid.');
+        if (is_string($fields)) {
+            $fields = array_map('trim', explode(',', $fields));
         }
 
-        return match (strtolower(trim($provider))) {
-            'azure', 'azure_openai', 'azure-openai' => $this->azureOpenAiProvider,
-            'openai' => $this->openAiProvider,
-            default => throw new RuntimeException(sprintf('Unsupported ReceiptScanner provider [%s].', $provider)),
-        };
+        if (! is_array($fields)) {
+            $fields = [];
+        }
+
+        $fields = array_values(array_unique(array_filter(array_map(
+            static fn ($field): string => is_string($field) ? trim($field) : '',
+            Arr::wrap($fields)
+        ))));
+
+        if ($fields !== []) {
+            return $fields;
+        }
+
+        return [
+            'merchant',
+            'date',
+            'total',
+            'amount',
+            'tax',
+            'vat',
+            'currency',
+            'line_items',
+            'mcc',
+            'confidence',
+            'metadata',
+        ];
     }
 }

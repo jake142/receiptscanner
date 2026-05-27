@@ -1,425 +1,494 @@
 <?php
 
-declare(strict_types=1);
-
 namespace Jake142\ReceiptScanner\Providers;
 
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Jake142\ReceiptScanner\Providers\Concerns\ExtractsOpenAiResponsesText;
-use JsonException;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
-use stdClass;
+use Throwable;
 
 class OpenAiProvider
 {
-    use ExtractsOpenAiResponsesText;
-
-    private const RESPONSES_URL = 'https://api.openai.com/v1/responses';
-
     /**
-     * Send a receipt image or PDF to the OpenAI Responses API and return the
-     * structured receipt JSON produced by the model.
-     *
-     * Expected context keys are the package's internal ProviderExtractContext
-     * shape: path, contents, mime_type, filename, and options.
+     * Extract structured receipt data from receipt image/PDF context using the OpenAI Responses API.
      *
      * @param array<string, mixed> $context
      * @return array<string, mixed>
      */
     public function extract(array $context): array
     {
-        $options = $this->contextOptions($context);
-        $apiKey = $this->configuredString('receiptscanner.providers.openai.api_key', $options['api_key'] ?? null);
+        $apiKey = (string) config('receiptscanner.providers.openai.api_key', '');
 
         if ($apiKey === '') {
-            throw new RuntimeException('OpenAI API key is not configured.');
+            throw new RuntimeException('OpenAI API key is not configured. Set OPENAI_API_KEY or receiptscanner.providers.openai.api_key.');
         }
 
-        $model = $this->configuredString('receiptscanner.providers.openai.model', $options['model'] ?? null);
+        $options = is_array($context['options'] ?? null) ? $context['options'] : [];
+        $fields = $this->fieldsFromContext($context);
+        $model = (string) ($options['model'] ?? config('receiptscanner.providers.openai.model', 'gpt-4.1-mini'));
+        $timeout = (int) ($options['timeout'] ?? config('receiptscanner.timeout', 60));
+        $retries = (int) ($options['retries'] ?? config('receiptscanner.retries', 2));
+        $baseUrl = rtrim((string) config('receiptscanner.providers.openai.base_url', 'https://api.openai.com/v1'), '/');
+        $endpoint = $baseUrl . '/responses';
 
-        if ($model === '') {
-            throw new RuntimeException('OpenAI model is not configured.');
-        }
-
-        $response = Http::withToken($apiKey)
-            ->acceptJson()
-            ->asJson()
-            ->timeout($this->requestTimeout($options))
-            ->post(self::RESPONSES_URL, $this->buildResponsesPayload($context, $model, $options));
-
-        if ($response->failed()) {
-            throw $this->openAiRequestException($response);
-        }
-
-        $body = $this->decodeResponseBody($response);
-        $generatedText = $this->extractOpenAiResponsesText($body);
-
-        if ($generatedText === null || trim($generatedText) === '') {
-            throw new RuntimeException('No generated text was found in OpenAI response.');
-        }
-
-        return $this->decodeReceiptJson($generatedText);
-    }
-
-    /**
-     * @param array<string, mixed> $context
-     * @param array<string, mixed> $options
-     * @return array<string, mixed>
-     */
-    private function buildResponsesPayload(array $context, string $model, array $options): array
-    {
-        if (array_key_exists('input', $options)) {
-            $payload = [
-                'model' => $model,
-                'input' => $options['input'],
-            ];
-        } else {
-            $content = [
+        $payload = [
+            'model' => $model,
+            'input' => [
                 [
-                    'type' => 'input_text',
-                    'text' => $this->prompt($options),
+                    'role' => 'user',
+                    'content' => $this->buildInputContent($context, $fields),
                 ],
-                $this->inputFileBlock($context),
-            ];
-
-            $payload = [
-                'model' => $model,
-                'input' => [
-                    [
-                        'role' => 'user',
-                        'content' => $content,
-                    ],
+            ],
+            'text' => [
+                'format' => [
+                    'type' => 'json_schema',
+                    'name' => 'receipt_scan_result',
+                    'strict' => true,
+                    'schema' => $this->buildReceiptJsonSchema($fields),
                 ],
-            ];
+            ],
+        ];
+
+        $response = $this->postJsonWithRetries($endpoint, $apiKey, $payload, $timeout, $retries);
+
+        if (! $response->successful()) {
+            $this->logHttpFailure($response);
+
+            $message = $this->safeResponseMessage($response);
+            throw new RuntimeException(sprintf(
+                'OpenAI receipt extraction failed with HTTP %d%s',
+                $response->status(),
+                $message !== '' ? ': ' . $message : ''
+            ));
         }
 
-        foreach (['temperature', 'top_p', 'max_output_tokens', 'metadata', 'reasoning', 'tools', 'tool_choice'] as $key) {
-            if (array_key_exists($key, $options)) {
-                $payload[$key] = $options[$key];
-            }
+        $json = $response->json();
+
+        if (! is_array($json)) {
+            throw new RuntimeException('OpenAI receipt extraction returned a non-JSON response.');
         }
 
-        if (array_key_exists('text', $options)) {
-            $payload['text'] = $options['text'];
-        } elseif (array_key_exists('text_format', $options)) {
-            $payload['text'] = ['format' => $options['text_format']];
+        $decoded = $this->decodeStructuredOutput($json);
+
+        if (! is_array($decoded)) {
+            throw new RuntimeException('OpenAI receipt extraction did not return a JSON object.');
         }
 
-        return $payload;
+        return $decoded;
     }
 
     /**
      * @param array<string, mixed> $context
-     * @return array<string, string>
+     * @return array<int, string>
      */
-    private function inputFileBlock(array $context): array
+    private function fieldsFromContext(array $context): array
     {
-        $path = is_string($context['path'] ?? null) ? $context['path'] : null;
-        $contents = is_string($context['contents'] ?? null) ? $context['contents'] : null;
-        $mimeType = $this->mimeType($context, $path, $contents);
-        $filename = $this->filename($context, $path, $mimeType);
+        $fields = $context['fields'] ?? null;
 
-        if ($contents === null && $path !== null && $this->isRemoteUrl($path)) {
-            if ($mimeType === 'application/pdf') {
-                return [
+        if (! is_array($fields) || $fields === []) {
+            $fields = config('receiptscanner.fields', []);
+        }
+
+        if (! is_array($fields) || $fields === []) {
+            $fields = [
+                'merchant',
+                'date',
+                'total',
+                'amount',
+                'tax',
+                'vat',
+                'currency',
+                'line_items',
+                'mcc',
+                'confidence',
+                'metadata',
+            ];
+        }
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn ($field): string => is_string($field) ? trim($field) : '',
+            $fields
+        ))));
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     * @param array<int, string> $fields
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildInputContent(array $context, array $fields): array
+    {
+        $content = [
+            [
+                'type' => 'input_text',
+                'text' => $this->buildPrompt($fields),
+            ],
+        ];
+
+        foreach ($this->pathsFromContext($context) as $path) {
+            $mimeType = $this->mimeTypeForPath($path, $context);
+            $dataUri = $this->dataUriForPath($path, $mimeType);
+
+            if ($this->isPdfMimeType($mimeType)) {
+                $content[] = [
                     'type' => 'input_file',
-                    'file_url' => $path,
+                    'filename' => basename($path) ?: 'receipt.pdf',
+                    'file_data' => $dataUri,
                 ];
+
+                continue;
             }
 
-            if (str_starts_with($mimeType, 'image/')) {
-                return [
-                    'type' => 'input_image',
-                    'image_url' => $path,
-                ];
-            }
-        }
-
-        if ($contents === null && $path !== null && is_file($path) && is_readable($path)) {
-            $contents = file_get_contents($path);
-
-            if ($contents === false) {
-                throw new RuntimeException(sprintf('Unable to read receipt file at path [%s].', $path));
-            }
-        }
-
-        if ($contents === null || $contents === '') {
-            throw new RuntimeException('Receipt contents are empty or could not be read.');
-        }
-
-        $dataUrl = sprintf('data:%s;base64,%s', $mimeType, base64_encode($contents));
-
-        if ($mimeType === 'application/pdf') {
-            return [
-                'type' => 'input_file',
-                'filename' => $filename,
-                'file_data' => $dataUrl,
-            ];
-        }
-
-        if (str_starts_with($mimeType, 'image/')) {
-            return [
+            $content[] = [
                 'type' => 'input_image',
-                'image_url' => $dataUrl,
+                'image_url' => $dataUri,
             ];
         }
 
-        throw new RuntimeException(sprintf('Unsupported receipt MIME type [%s]. OpenAI receipt extraction supports images and PDFs.', $mimeType));
+        return $content;
+    }
+
+    /**
+     * @param array<int, string> $fields
+     */
+    private function buildPrompt(array $fields): string
+    {
+        return 'Extract the receipt information from the attached receipt image(s) or PDF. '
+            . 'Return a single JSON object only, matching the provided JSON schema exactly. '
+            . 'Use null when a requested field is not visible or cannot be determined. '
+            . 'Do not invent values. Requested fields: ' . implode(', ', $fields) . '.';
     }
 
     /**
      * @param array<string, mixed> $context
-     * @param array<string, mixed> $options
+     * @return array<int, string>
      */
-    private function prompt(array $options): string
+    private function pathsFromContext(array $context): array
     {
-        if (isset($options['prompt']) && is_string($options['prompt']) && trim($options['prompt']) !== '') {
-            return $options['prompt'];
+        $paths = $context['paths'] ?? null;
+
+        if (is_string($paths)) {
+            $paths = [$paths];
         }
 
-        return implode("\n", [
-            'Extract the receipt information from the provided image or PDF.',
-            'Return only valid JSON using this shape:',
-            '{"merchant":null,"date":null,"total":null,"subtotal":null,"tax":null,"currency":null,"items":[],"raw":null}',
-            'Use numbers for monetary values when possible. Use null when a value is not present. Do not include markdown or explanatory text.',
-        ]);
-    }
-
-    /**
-     * @param array<string, mixed> $context
-     * @return array<string, mixed>
-     */
-    private function contextOptions(array $context): array
-    {
-        return isset($context['options']) && is_array($context['options']) ? $context['options'] : [];
-    }
-
-    /**
-     * @param array<string, mixed> $options
-     */
-    private function requestTimeout(array $options): int
-    {
-        $timeout = $options['timeout'] ?? 60;
-
-        if (is_int($timeout) && $timeout > 0) {
-            return $timeout;
+        if (! is_array($paths) || $paths === []) {
+            throw new RuntimeException('No receipt image or PDF path was provided to the OpenAI provider.');
         }
 
-        if (is_numeric($timeout) && (int) $timeout > 0) {
-            return (int) $timeout;
+        $normalized = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path) || trim($path) === '') {
+                throw new RuntimeException('Receipt paths must be non-empty strings.');
+            }
+
+            $normalized[] = $path;
         }
 
-        return 60;
-    }
-
-    private function configuredString(string $configKey, mixed $override = null): string
-    {
-        $value = $override ?? config($configKey);
-
-        return is_string($value) ? trim($value) : '';
+        return $normalized;
     }
 
     /**
      * @param array<string, mixed> $context
      */
-    private function mimeType(array $context, ?string $path, ?string $contents): string
+    private function mimeTypeForPath(string $path, array $context): string
     {
-        if (isset($context['mime_type']) && is_string($context['mime_type']) && trim($context['mime_type']) !== '') {
-            return strtolower(trim($context['mime_type']));
+        $options = is_array($context['options'] ?? null) ? $context['options'] : [];
+        $configuredMimeType = $options['mime_type'] ?? $context['mime_type'] ?? null;
+
+        if (is_string($configuredMimeType) && trim($configuredMimeType) !== '') {
+            return strtolower(trim($configuredMimeType));
         }
 
-        if ($path !== null && ! $this->isRemoteUrl($path) && is_file($path)) {
-            $detected = function_exists('mime_content_type') ? mime_content_type($path) : false;
+        if (is_file($path)) {
+            $detected = @mime_content_type($path);
 
             if (is_string($detected) && $detected !== '') {
                 return strtolower($detected);
             }
         }
 
-        if ($contents !== null && class_exists('finfo')) {
-            $finfo = new \finfo(FILEINFO_MIME_TYPE);
-            $detected = $finfo->buffer($contents);
-
-            if (is_string($detected) && $detected !== '') {
-                return strtolower($detected);
-            }
-        }
-
-        $extension = $path !== null ? strtolower((string) pathinfo(parse_url($path, PHP_URL_PATH) ?: $path, PATHINFO_EXTENSION)) : '';
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
 
         return match ($extension) {
             'pdf' => 'application/pdf',
             'png' => 'image/png',
-            'gif' => 'image/gif',
             'webp' => 'image/webp',
+            'gif' => 'image/gif',
             'jpg', 'jpeg' => 'image/jpeg',
             default => 'application/octet-stream',
         };
     }
 
+    private function dataUriForPath(string $path, string $mimeType): string
+    {
+        if (! is_file($path) || ! is_readable($path)) {
+            throw new RuntimeException(sprintf('Receipt file is not readable: %s', $path));
+        }
+
+        $contents = file_get_contents($path);
+
+        if ($contents === false) {
+            throw new RuntimeException(sprintf('Unable to read receipt file: %s', $path));
+        }
+
+        return sprintf('data:%s;base64,%s', $mimeType, base64_encode($contents));
+    }
+
+    private function isPdfMimeType(string $mimeType): bool
+    {
+        return strtolower($mimeType) === 'application/pdf';
+    }
+
     /**
-     * @param array<string, mixed> $context
+     * @param array<string, mixed> $payload
      */
-    private function filename(array $context, ?string $path, string $mimeType): string
+    private function postJsonWithRetries(string $endpoint, string $apiKey, array $payload, int $timeout, int $retries): Response
     {
-        if (isset($context['filename']) && is_string($context['filename']) && trim($context['filename']) !== '') {
-            return trim($context['filename']);
-        }
+        $attempts = max(1, $retries + 1);
+        $lastException = null;
 
-        if ($path !== null) {
-            $basename = basename((string) (parse_url($path, PHP_URL_PATH) ?: $path));
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            try {
+                $response = Http::timeout(max(1, $timeout))
+                    ->acceptJson()
+                    ->asJson()
+                    ->withToken($apiKey)
+                    ->post($endpoint, $payload);
 
-            if ($basename !== '' && $basename !== '.' && $basename !== '/') {
-                return $basename;
+                if (! $this->shouldRetryResponse($response) || $attempt === $attempts) {
+                    return $response;
+                }
+            } catch (Throwable $exception) {
+                $lastException = $exception;
+
+                if ($attempt === $attempts) {
+                    break;
+                }
             }
+
+            usleep(250000 * $attempt);
         }
 
-        return match ($mimeType) {
-            'application/pdf' => 'receipt.pdf',
-            'image/png' => 'receipt.png',
-            'image/gif' => 'receipt.gif',
-            'image/webp' => 'receipt.webp',
-            default => 'receipt.jpg',
-        };
+        throw new RuntimeException(
+            'OpenAI receipt extraction request failed before receiving a response.',
+            0,
+            $lastException
+        );
     }
 
-    private function isRemoteUrl(string $path): bool
+    private function shouldRetryResponse(Response $response): bool
     {
-        return str_starts_with($path, 'http://') || str_starts_with($path, 'https://');
-    }
+        $status = $response->status();
 
-    private function openAiRequestException(Response $response): RuntimeException
-    {
-        $message = sprintf('OpenAI request failed with HTTP status %d.', $response->status());
-        $body = $response->json();
-
-        if (is_array($body)) {
-            $errorMessage = $this->nestedString($body, ['error', 'message'])
-                ?? $this->nestedString($body, ['message']);
-
-            if ($errorMessage !== null && trim($errorMessage) !== '') {
-                $message .= ' '.$errorMessage;
-            }
-        } else {
-            $plainBody = trim($response->body());
-
-            if ($plainBody !== '') {
-                $message .= ' '.$plainBody;
-            }
-        }
-
-        return new RuntimeException($message);
+        return $status === 429 || ($status >= 500 && $status <= 599);
     }
 
     /**
-     * @return array<string, mixed>|stdClass
-     */
-    private function decodeResponseBody(Response $response): array|stdClass
-    {
-        $decoded = $response->json();
-
-        if (is_array($decoded)) {
-            return $decoded;
-        }
-
-        try {
-            $decoded = json_decode($response->body(), false, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException('OpenAI response was not valid JSON.', previous: $exception);
-        }
-
-        if ($decoded instanceof stdClass) {
-            return $decoded;
-        }
-
-        throw new RuntimeException('OpenAI response JSON did not contain an object.');
-    }
-
-    /**
+     * @param array<int, string> $fields
      * @return array<string, mixed>
      */
-    private function decodeReceiptJson(string $generatedText): array
+    private function buildReceiptJsonSchema(array $fields): array
     {
-        $json = trim($generatedText);
+        $knownProperties = [
+            'merchant' => ['type' => ['string', 'null']],
+            'date' => ['type' => ['string', 'null']],
+            'total' => ['type' => ['number', 'string', 'null']],
+            'amount' => ['type' => ['number', 'string', 'null']],
+            'tax' => ['type' => ['number', 'string', 'null']],
+            'vat' => ['type' => ['number', 'string', 'null']],
+            'currency' => ['type' => ['string', 'null']],
+            'line_items' => [
+                'type' => ['array', 'null'],
+                'items' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'name' => ['type' => ['string', 'null']],
+                        'quantity' => ['type' => ['number', 'string', 'null']],
+                        'unit_price' => ['type' => ['number', 'string', 'null']],
+                        'total' => ['type' => ['number', 'string', 'null']],
+                        'category' => ['type' => ['string', 'null']],
+                    ],
+                    'required' => ['name', 'quantity', 'unit_price', 'total', 'category'],
+                ],
+            ],
+            'mcc' => ['type' => ['string', 'null']],
+            'confidence' => ['type' => ['number', 'null'], 'minimum' => 0, 'maximum' => 1],
+            'metadata' => [
+                'type' => ['object', 'null'],
+                'additionalProperties' => [
+                    'type' => ['string', 'number', 'integer', 'boolean', 'null'],
+                ],
+            ],
+        ];
 
-        try {
-            $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            $decoded = $this->decodeJsonFromTextBlock($json);
+        $properties = [];
+
+        foreach ($fields as $field) {
+            $properties[$field] = $knownProperties[$field] ?? [
+                'type' => ['string', 'number', 'integer', 'boolean', 'object', 'array', 'null'],
+            ];
         }
 
-        if (! is_array($decoded)) {
-            throw new RuntimeException('OpenAI generated receipt content was not a JSON object.');
-        }
-
-        /** @var array<string, mixed> $receipt */
-        $receipt = $decoded;
-
-        if (! array_key_exists('raw', $receipt)) {
-            $receipt['raw'] = $generatedText;
-        }
-
-        return $receipt;
+        return [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'properties' => $properties,
+            'required' => array_values($fields),
+        ];
     }
 
     /**
-     * @return array<string, mixed>
+     * @param array<string, mixed> $responseJson
+     * @return array<string, mixed>|null
      */
-    private function decodeJsonFromTextBlock(string $text): array
+    private function decodeStructuredOutput(array $responseJson): ?array
     {
-        $candidate = $this->extractJsonCandidate($text);
+        $directText = $this->firstTextOutput($responseJson);
 
-        if ($candidate === null) {
-            throw new RuntimeException('OpenAI generated receipt content was not valid JSON.');
+        if ($directText === null) {
+            return null;
         }
 
-        try {
-            $decoded = json_decode($candidate, true, 512, JSON_THROW_ON_ERROR);
-        } catch (JsonException $exception) {
-            throw new RuntimeException('OpenAI generated receipt content was not valid JSON.', previous: $exception);
-        }
+        $decoded = json_decode($this->stripJsonCodeFence($directText), true);
 
-        if (! is_array($decoded)) {
-            throw new RuntimeException('OpenAI generated receipt content was not a JSON object.');
-        }
-
-        /** @var array<string, mixed> $decoded */
-        return $decoded;
+        return is_array($decoded) ? $decoded : null;
     }
 
-    private function extractJsonCandidate(string $text): ?string
+    /**
+     * @param array<string, mixed> $responseJson
+     */
+    private function firstTextOutput(array $responseJson): ?string
     {
-        if (preg_match('/```(?:json)?\s*(.*?)\s*```/is', $text, $matches) === 1) {
-            return trim($matches[1]);
+        $outputText = $responseJson['output_text'] ?? null;
+
+        if (is_string($outputText) && trim($outputText) !== '') {
+            return $outputText;
         }
 
-        $objectStart = strpos($text, '{');
-        $objectEnd = strrpos($text, '}');
+        $output = $responseJson['output'] ?? null;
 
-        if ($objectStart !== false && $objectEnd !== false && $objectEnd > $objectStart) {
-            return substr($text, $objectStart, $objectEnd - $objectStart + 1);
+        if (is_array($output)) {
+            foreach ($output as $outputItem) {
+                if (! is_array($outputItem)) {
+                    continue;
+                }
+
+                $content = $outputItem['content'] ?? null;
+
+                if (! is_array($content)) {
+                    continue;
+                }
+
+                foreach ($content as $contentItem) {
+                    if (! is_array($contentItem)) {
+                        continue;
+                    }
+
+                    $text = $contentItem['text'] ?? null;
+
+                    if (is_string($text) && trim($text) !== '') {
+                        return $text;
+                    }
+
+                    $json = $contentItem['json'] ?? null;
+
+                    if (is_array($json)) {
+                        return json_encode($json, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: null;
+                    }
+                }
+            }
+        }
+
+        $choices = $responseJson['choices'] ?? null;
+
+        if (is_array($choices)) {
+            foreach ($choices as $choice) {
+                if (! is_array($choice)) {
+                    continue;
+                }
+
+                $message = $choice['message'] ?? null;
+                $content = is_array($message) ? ($message['content'] ?? null) : null;
+
+                if (is_string($content) && trim($content) !== '') {
+                    return $content;
+                }
+            }
         }
 
         return null;
     }
 
-    /**
-     * @param array<string, mixed> $source
-     * @param array<int, string> $path
-     */
-    private function nestedString(array $source, array $path): ?string
+    private function stripJsonCodeFence(string $text): string
     {
-        $value = $source;
+        $trimmed = trim($text);
 
-        foreach ($path as $segment) {
-            if (! is_array($value) || ! array_key_exists($segment, $value)) {
-                return null;
-            }
-
-            $value = $value[$segment];
+        if (preg_match('/^```(?:json)?\s*(.*?)\s*```$/is', $trimmed, $matches) === 1) {
+            return trim($matches[1]);
         }
 
-        return is_string($value) ? $value : null;
+        return $trimmed;
+    }
+
+    private function logHttpFailure(Response $response): void
+    {
+        if (! (bool) config('receiptscanner.logging', false)) {
+            return;
+        }
+
+        Log::channel((string) config('logging.default', 'stack'))->warning('OpenAI receipt extraction HTTP error.', [
+            'provider' => 'openai',
+            'endpoint_mode' => 'responses',
+            'status' => $response->status(),
+            'request_id' => $this->requestIdFromResponse($response),
+            'message' => $this->safeResponseMessage($response),
+        ]);
+    }
+
+    private function requestIdFromResponse(Response $response): ?string
+    {
+        foreach (['x-request-id', 'openai-request-id', 'request-id'] as $header) {
+            $value = $response->header($header);
+
+            if (is_string($value) && $value !== '') {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    private function safeResponseMessage(Response $response): string
+    {
+        $json = $response->json();
+        $message = '';
+
+        if (is_array($json)) {
+            $error = $json['error'] ?? null;
+
+            if (is_array($error) && is_string($error['message'] ?? null)) {
+                $message = $error['message'];
+            } elseif (is_string($json['message'] ?? null)) {
+                $message = $json['message'];
+            }
+        }
+
+        if ($message === '') {
+            $message = $response->body();
+        }
+
+        return $this->redactSensitiveText(mb_substr(trim($message), 0, 1000));
+    }
+
+    private function redactSensitiveText(string $text): string
+    {
+        $text = preg_replace('/Bearer\s+[A-Za-z0-9._\-]+/i', 'Bearer [redacted]', $text) ?? $text;
+        $text = preg_replace('/(api[-_]?key\s*[:=]\s*)[^\s,}]+/i', '$1[redacted]', $text) ?? $text;
+        $text = preg_replace('/data:(?:image|application)\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+\/=\r\n]+/i', '[redacted-file-data]', $text) ?? $text;
+
+        return $text;
     }
 }

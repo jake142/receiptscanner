@@ -4,412 +4,496 @@ declare(strict_types=1);
 
 namespace Jake142\ReceiptScanner\Providers;
 
-use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Jake142\ReceiptScanner\Exceptions\ProviderException;
+use Illuminate\Support\Facades\Log;
+use InvalidArgumentException;
+use RuntimeException;
 use Throwable;
 
 class GeminiProvider
 {
-    private const PROVIDER = 'gemini';
-
     /**
-     * Send a normalized receipt extraction or repair request to Gemini.
+     * Extract structured receipt data from image/PDF inputs using Gemini.
      *
-     * Expected context keys:
-     * - prompt: JSON-only extraction or repair prompt text
-     * - files: array of FileInput instances for extraction; may be empty for repair
-     * - model: optional Gemini model override
-     *
-     * @param array<string, mixed> $context
-     * @return array{text: string, provider: string, model: string, request_id: ?string, response_id: ?string, status: int}
+     * @param  array<string, mixed>  $context
+     * @return array<string, mixed>
      */
     public function extract(array $context): array
     {
-        $model = $this->model($context);
-        $apiKey = $this->apiKey();
-        $url = $this->endpointUrl($model);
-        $payload = $this->payload($context);
+        $apiKey = trim((string) config('receiptscanner.providers.gemini.api_key', ''));
 
-        $response = $this->sendWithRetries($url, $apiKey, $payload, $model);
+        if ($apiKey === '') {
+            throw new InvalidArgumentException('Gemini API key is not configured. Set GEMINI_API_KEY or receiptscanner.providers.gemini.api_key.');
+        }
+
+        $options = is_array($context['options'] ?? null) ? $context['options'] : [];
+        $model = trim((string) ($options['model'] ?? config('receiptscanner.providers.gemini.model', 'gemini-2.5-flash')));
+
+        if ($model === '') {
+            $model = 'gemini-2.5-flash';
+        }
+
+        $fields = $this->resolveFields($context, $options);
+        $endpoint = $this->buildEndpoint((string) config('receiptscanner.providers.gemini.base_url', 'https://generativelanguage.googleapis.com/v1beta'), $model);
+
+        $payload = [
+            'contents' => [
+                [
+                    'role' => 'user',
+                    'parts' => $this->buildParts($context, $fields),
+                ],
+            ],
+            'generationConfig' => [
+                'temperature' => 0,
+                'maxOutputTokens' => 8192,
+                'responseMimeType' => 'application/json',
+                'responseSchema' => $this->buildResponseSchema($fields),
+            ],
+        ];
+
+        $response = $this->postJsonWithRetries(
+            $endpoint,
+            $apiKey,
+            $payload,
+            (int) ($options['timeout'] ?? config('receiptscanner.timeout', 60)),
+            (int) ($options['retries'] ?? config('receiptscanner.retries', 2))
+        );
+
+        if ($response->failed()) {
+            $diagnostic = $this->buildHttpErrorDiagnostic($response);
+            $this->logSafeFailure($diagnostic);
+
+            throw new RuntimeException('Gemini receipt extraction failed: '.json_encode($diagnostic, JSON_UNESCAPED_SLASHES));
+        }
+
         $body = $response->json();
 
         if (! is_array($body)) {
-            throw $this->failure('Gemini returned a non-JSON response.', $response->status(), [
-                'provider' => self::PROVIDER,
-                'model' => $model,
-                'request_id' => $this->requestId($response),
-            ]);
+            throw new RuntimeException('Gemini receipt extraction failed: upstream response was not valid JSON.');
         }
 
-        $text = $this->candidateText($body);
+        $text = $this->extractFirstText($body);
+        $decoded = $this->decodeJsonObject($text);
 
-        if ($text === '') {
-            throw $this->failure('Gemini response did not contain candidate text.', $response->status(), [
-                'provider' => self::PROVIDER,
-                'model' => $model,
-                'request_id' => $this->requestId($response),
-                'response_id' => $this->responseId($body),
-                'finish_reason' => $this->finishReason($body),
-                'block_reason' => $this->blockReason($body),
-            ]);
+        if (! is_array($decoded)) {
+            throw new RuntimeException('Gemini receipt extraction failed: model output was not a JSON object.');
         }
 
-        return [
-            'text' => $text,
-            'provider' => self::PROVIDER,
-            'model' => $model,
-            'request_id' => $this->requestId($response),
-            'response_id' => $this->responseId($body),
-            'status' => $response->status(),
-        ];
+        return $decoded;
     }
 
     /**
-     * @param array<string, mixed> $context
-     * @return array<string, mixed>
+     * @param  array<string, mixed>  $context
+     * @param  array<string, mixed>  $options
+     * @return array<int, string>
      */
-    private function payload(array $context): array
+    private function resolveFields(array $context, array $options): array
     {
-        $prompt = trim((string) ($context['prompt'] ?? ''));
+        $fields = $context['fields'] ?? $options['fields'] ?? config('receiptscanner.fields', []);
 
-        if ($prompt === '') {
-            throw $this->failure('Gemini prompt is empty.', null, [
-                'provider' => self::PROVIDER,
-            ]);
+        if (! is_array($fields) || $fields === []) {
+            $fields = [
+                'merchant',
+                'date',
+                'total',
+                'amount',
+                'tax',
+                'vat',
+                'currency',
+                'line_items',
+                'mcc',
+                'confidence',
+                'metadata',
+            ];
         }
 
-        $parts = [[
-            'text' => $prompt,
-        ]];
+        return array_values(array_filter(array_map(
+            static fn (mixed $field): string => trim((string) $field),
+            $fields
+        ), static fn (string $field): bool => $field !== ''));
+    }
 
-        foreach ($this->files($context) as $file) {
-            $mime = $this->fileMime($file);
-            $base64 = $this->fileBase64($file);
+    private function buildEndpoint(string $baseUrl, string $model): string
+    {
+        $baseUrl = rtrim($baseUrl, '/');
+        $modelPath = str_starts_with($model, 'models/') ? $model : 'models/'.$model;
+        $encodedModelPath = implode('/', array_map('rawurlencode', explode('/', $modelPath)));
 
-            if ($mime === '' || $base64 === '') {
-                throw $this->failure('Gemini file part is missing MIME type or base64 data.', null, [
-                    'provider' => self::PROVIDER,
-                ]);
+        return $baseUrl.'/'.$encodedModelPath.':generateContent';
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     * @param  array<int, string>  $fields
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildParts(array $context, array $fields): array
+    {
+        $paths = $context['paths'] ?? $context['path'] ?? [];
+
+        if (is_string($paths)) {
+            $paths = [$paths];
+        }
+
+        if (! is_array($paths) || $paths === []) {
+            throw new InvalidArgumentException('Gemini receipt extraction requires at least one image or PDF path.');
+        }
+
+        $parts = [
+            [
+                'text' => $this->buildPrompt($fields),
+            ],
+        ];
+
+        foreach ($paths as $path) {
+            $path = (string) $path;
+
+            if ($path === '' || ! is_file($path) || ! is_readable($path)) {
+                throw new InvalidArgumentException('Gemini receipt extraction input file is not readable: '.$path);
+            }
+
+            $contents = file_get_contents($path);
+
+            if ($contents === false) {
+                throw new InvalidArgumentException('Gemini receipt extraction input file could not be read: '.$path);
             }
 
             $parts[] = [
-                'inline_data' => [
-                    'mime_type' => $mime,
-                    'data' => $base64,
+                'inlineData' => [
+                    'mimeType' => $this->mimeTypeForPath($path, $context),
+                    'data' => base64_encode($contents),
                 ],
             ];
         }
 
+        return $parts;
+    }
+
+    /**
+     * @param  array<int, string>  $fields
+     */
+    private function buildPrompt(array $fields): string
+    {
+        return implode("\n", [
+            'Extract the receipt data from the attached image or PDF.',
+            'Return only one valid JSON object. Do not wrap it in Markdown and do not include explanatory text.',
+            'Use these top-level fields exactly: '.json_encode($fields, JSON_UNESCAPED_SLASHES).'.',
+            'Use null for missing scalar values. Use an empty array for line_items when no line items are visible.',
+            'Preserve numeric values as numbers when possible. Use ISO-4217 currency codes when visible.',
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function mimeTypeForPath(string $path, array $context): string
+    {
+        $configured = $context['mime_type'] ?? null;
+
+        if (is_string($configured) && trim($configured) !== '') {
+            return trim($configured);
+        }
+
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        return match ($extension) {
+            'pdf' => 'application/pdf',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'gif' => 'image/gif',
+            'heic' => 'image/heic',
+            'heif' => 'image/heif',
+            default => 'image/jpeg',
+        };
+    }
+
+    /**
+     * @param  array<int, string>  $fields
+     * @return array<string, mixed>
+     */
+    private function buildResponseSchema(array $fields): array
+    {
+        $properties = [];
+
+        foreach ($fields as $field) {
+            $properties[$field] = $this->schemaForField($field);
+        }
+
         return [
-            'contents' => [[
-                'role' => 'user',
-                'parts' => $parts,
-            ]],
-            'generationConfig' => [
-                'temperature' => 0,
-                'response_mime_type' => 'application/json',
-            ],
+            'type' => 'OBJECT',
+            'properties' => $properties,
+            'required' => array_keys($properties),
+            'propertyOrdering' => array_keys($properties),
         ];
     }
 
     /**
-     * @param array<string, mixed> $context
-     * @return array<int, mixed>
+     * @return array<string, mixed>
      */
-    private function files(array $context): array
+    private function schemaForField(string $field): array
     {
-        $files = $context['files'] ?? [];
-
-        if (! is_array($files)) {
-            return [];
-        }
-
-        return array_values($files);
+        return match ($field) {
+            'total', 'amount', 'tax', 'vat', 'confidence' => [
+                'type' => 'NUMBER',
+                'nullable' => true,
+            ],
+            'line_items' => [
+                'type' => 'ARRAY',
+                'items' => [
+                    'type' => 'OBJECT',
+                    'properties' => [
+                        'name' => ['type' => 'STRING', 'nullable' => true],
+                        'quantity' => ['type' => 'NUMBER', 'nullable' => true],
+                        'unit_price' => ['type' => 'NUMBER', 'nullable' => true],
+                        'total' => ['type' => 'NUMBER', 'nullable' => true],
+                        'amount' => ['type' => 'NUMBER', 'nullable' => true],
+                        'category' => ['type' => 'STRING', 'nullable' => true],
+                    ],
+                ],
+            ],
+            'metadata' => [
+                'type' => 'OBJECT',
+                'nullable' => true,
+                'properties' => [
+                    'notes' => ['type' => 'STRING', 'nullable' => true],
+                    'receipt_number' => ['type' => 'STRING', 'nullable' => true],
+                    'payment_method' => ['type' => 'STRING', 'nullable' => true],
+                ],
+            ],
+            default => [
+                'type' => 'STRING',
+                'nullable' => true,
+            ],
+        };
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
-    private function sendWithRetries(string $url, string $apiKey, array $payload, string $model): Response
+    private function postJsonWithRetries(string $endpoint, string $apiKey, array $payload, int $timeout, int $retries): Response
     {
-        $attempts = max(1, (int) $this->config('receiptscanner.retries.attempts', 1));
-        $delayMs = max(0, (int) $this->config('receiptscanner.retries.base_delay_ms', 250));
-        $timeout = max(1, (int) $this->config('receiptscanner.timeout', 60));
-        $lastConnectionException = null;
+        $attempts = max(1, $retries + 1);
+        $lastThrowable = null;
 
         for ($attempt = 1; $attempt <= $attempts; $attempt++) {
             try {
-                $response = Http::timeout($timeout)
-                    ->connectTimeout(min(10, $timeout))
-                    ->acceptJson()
+                $response = Http::acceptJson()
                     ->asJson()
+                    ->timeout(max(1, $timeout))
                     ->withHeaders([
                         'x-goog-api-key' => $apiKey,
                     ])
-                    ->post($url, $payload);
-            } catch (ConnectionException $exception) {
-                $lastConnectionException = $exception;
+                    ->post($endpoint, $payload);
 
-                if ($attempt < $attempts) {
-                    $this->sleepBeforeRetry($delayMs);
+                if (! $this->shouldRetryResponse($response) || $attempt === $attempts) {
+                    return $response;
+                }
+            } catch (Throwable $throwable) {
+                $lastThrowable = $throwable;
+
+                if ($attempt === $attempts) {
+                    throw new RuntimeException('Gemini receipt extraction failed: '.$throwable->getMessage(), 0, $throwable);
+                }
+            }
+
+            usleep(250000 * $attempt);
+        }
+
+        throw new RuntimeException('Gemini receipt extraction failed: '.($lastThrowable?->getMessage() ?? 'request did not complete'));
+    }
+
+    private function shouldRetryResponse(Response $response): bool
+    {
+        return $response->status() === 429 || $response->serverError();
+    }
+
+    /**
+     * @param  array<string, mixed>  $body
+     */
+    private function extractFirstText(array $body): string
+    {
+        $candidates = $body['candidates'] ?? [];
+
+        if (is_array($candidates)) {
+            foreach ($candidates as $candidate) {
+                if (! is_array($candidate)) {
                     continue;
                 }
 
-                throw $this->failure('Gemini request failed before receiving a response.', null, [
-                    'provider' => self::PROVIDER,
-                    'model' => $model,
-                ], $exception);
-            }
+                $parts = $candidate['content']['parts'] ?? [];
 
-            if ($this->isTransientStatus($response->status()) && $attempt < $attempts) {
-                $this->sleepBeforeRetry($delayMs);
+                if (! is_array($parts)) {
+                    continue;
+                }
+
+                $texts = [];
+
+                foreach ($parts as $part) {
+                    if (is_array($part) && isset($part['text']) && trim((string) $part['text']) !== '') {
+                        $texts[] = (string) $part['text'];
+                    }
+                }
+
+                $text = trim(implode("\n", $texts));
+
+                if ($text !== '') {
+                    return $text;
+                }
+            }
+        }
+
+        if (isset($body['text']) && trim((string) $body['text']) !== '') {
+            return trim((string) $body['text']);
+        }
+
+        throw new RuntimeException('Gemini receipt extraction failed: upstream response did not contain text output.');
+    }
+
+    /**
+     * @return array<string, mixed>|array<int, mixed>
+     */
+    private function decodeJsonObject(string $text): array
+    {
+        $text = trim($text);
+
+        if (preg_match('/^```(?:json)?\s*(.*?)\s*```$/is', $text, $matches) === 1) {
+            $text = trim($matches[1]);
+        }
+
+        $decoded = json_decode($text, true);
+
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            return $decoded;
+        }
+
+        $fragment = $this->extractJsonFragment($text);
+
+        if ($fragment !== null) {
+            $decoded = json_decode($fragment, true);
+
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        throw new RuntimeException('Gemini receipt extraction failed: model output was not valid JSON.');
+    }
+
+    private function extractJsonFragment(string $text): ?string
+    {
+        $starts = array_filter([
+            strpos($text, '{'),
+            strpos($text, '['),
+        ], static fn (int|false $position): bool => $position !== false);
+
+        if ($starts === []) {
+            return null;
+        }
+
+        $start = min($starts);
+        $opening = $text[$start];
+        $closing = $opening === '{' ? '}' : ']';
+        $depth = 0;
+        $inString = false;
+        $escaped = false;
+        $length = strlen($text);
+
+        for ($index = $start; $index < $length; $index++) {
+            $char = $text[$index];
+
+            if ($inString) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+
+                if ($char === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+
+                if ($char === '"') {
+                    $inString = false;
+                }
+
                 continue;
             }
 
-            if ($response->failed()) {
-                throw $this->httpFailure($response, $model);
+            if ($char === '"') {
+                $inString = true;
+                continue;
             }
 
-            return $response;
+            if ($char === $opening) {
+                $depth++;
+            } elseif ($char === $closing) {
+                $depth--;
+
+                if ($depth === 0) {
+                    return substr($text, $start, $index - $start + 1);
+                }
+            }
         }
 
-        throw $this->failure('Gemini request failed after retry attempts.', null, [
-            'provider' => self::PROVIDER,
-            'model' => $model,
-        ], $lastConnectionException);
+        return null;
     }
 
-    private function httpFailure(Response $response, string $model): ProviderException
+    /**
+     * @return array<string, mixed>
+     */
+    private function buildHttpErrorDiagnostic(Response $response): array
     {
         $body = $response->json();
-        $errorCode = null;
-        $errorStatus = null;
+        $message = null;
 
-        if (is_array($body) && isset($body['error']) && is_array($body['error'])) {
-            $errorCode = isset($body['error']['code']) && is_scalar($body['error']['code'])
-                ? (string) $body['error']['code']
-                : null;
-            $errorStatus = isset($body['error']['status']) && is_scalar($body['error']['status'])
-                ? (string) $body['error']['status']
-                : null;
+        if (is_array($body)) {
+            $message = $body['error']['message'] ?? $body['message'] ?? null;
         }
 
-        return $this->failure('Gemini request was rejected by the upstream provider.', $response->status(), [
-            'provider' => self::PROVIDER,
-            'model' => $model,
-            'request_id' => $this->requestId($response),
-            'error_code' => $errorCode,
-            'error_status' => $errorStatus,
-        ]);
+        if (! is_string($message) || trim($message) === '') {
+            $message = $response->body();
+        }
+
+        return [
+            'provider' => 'gemini',
+            'endpoint_mode' => 'generateContent',
+            'status' => $response->status(),
+            'request_id' => $response->header('x-request-id')
+                ?? $response->header('x-goog-request-id')
+                ?? $response->header('x-cloud-trace-context'),
+            'message' => $this->safeExcerpt((string) $message),
+        ];
     }
 
-    private function isTransientStatus(int $status): bool
+    /**
+     * @param  array<string, mixed>  $diagnostic
+     */
+    private function logSafeFailure(array $diagnostic): void
     {
-        return $status === 429 || $status >= 500;
-    }
-
-    private function sleepBeforeRetry(int $delayMs): void
-    {
-        if ($delayMs <= 0) {
+        if (! $this->loggingEnabled()) {
             return;
         }
 
-        usleep($delayMs * 1000);
+        Log::channel((string) config('logging.default', 'stack'))->warning('Gemini receipt extraction failed.', $diagnostic);
     }
 
-    /**
-     * @param array<string, mixed> $body
-     */
-    private function candidateText(array $body): string
+    private function loggingEnabled(): bool
     {
-        $candidates = $body['candidates'] ?? null;
+        $value = config('receiptscanner.logging', false);
 
-        if (! is_array($candidates) || ! isset($candidates[0]) || ! is_array($candidates[0])) {
-            return '';
+        if (is_bool($value)) {
+            return $value;
         }
 
-        $content = $candidates[0]['content'] ?? null;
-
-        if (! is_array($content)) {
-            return '';
-        }
-
-        $parts = $content['parts'] ?? null;
-
-        if (! is_array($parts)) {
-            return '';
-        }
-
-        $texts = [];
-
-        foreach ($parts as $part) {
-            if (is_array($part) && isset($part['text']) && is_string($part['text']) && trim($part['text']) !== '') {
-                $texts[] = $part['text'];
-            }
-        }
-
-        return trim(implode("\n", $texts));
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 
-    /**
-     * @param array<string, mixed> $body
-     */
-    private function responseId(array $body): ?string
+    private function safeExcerpt(string $message): string
     {
-        foreach (['responseId', 'response_id'] as $key) {
-            if (isset($body[$key]) && is_scalar($body[$key]) && (string) $body[$key] !== '') {
-                return (string) $body[$key];
-            }
-        }
+        $message = preg_replace('/[A-Za-z0-9+\/]{160,}={0,2}/', '[redacted-base64]', $message) ?? $message;
+        $message = preg_replace('/(x-goog-api-key|api-key|authorization)\s*[:=]\s*[^\s,}]+/i', '$1: [redacted]', $message) ?? $message;
 
-        return null;
-    }
-
-    private function requestId(Response $response): ?string
-    {
-        foreach (['x-request-id', 'x-goog-request-id', 'request-id'] as $header) {
-            $value = $response->header($header);
-
-            if (is_array($value)) {
-                $value = $value[0] ?? null;
-            }
-
-            if (is_scalar($value) && (string) $value !== '') {
-                return (string) $value;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * @param array<string, mixed> $body
-     */
-    private function finishReason(array $body): ?string
-    {
-        $reason = $body['candidates'][0]['finishReason'] ?? $body['candidates'][0]['finish_reason'] ?? null;
-
-        return is_scalar($reason) && (string) $reason !== '' ? (string) $reason : null;
-    }
-
-    /**
-     * @param array<string, mixed> $body
-     */
-    private function blockReason(array $body): ?string
-    {
-        $reason = $body['promptFeedback']['blockReason'] ?? $body['prompt_feedback']['block_reason'] ?? null;
-
-        return is_scalar($reason) && (string) $reason !== '' ? (string) $reason : null;
-    }
-
-    private function apiKey(): string
-    {
-        $apiKey = trim((string) $this->config('receiptscanner.providers.gemini.api_key', ''));
-
-        if ($apiKey === '') {
-            throw $this->failure('Gemini API key is not configured. Set GEMINI_API_KEY or receiptscanner.providers.gemini.api_key.', null, [
-                'provider' => self::PROVIDER,
-            ]);
-        }
-
-        return $apiKey;
-    }
-
-    /**
-     * @param array<string, mixed> $context
-     */
-    private function model(array $context): string
-    {
-        $model = trim((string) ($context['model'] ?? ''));
-
-        if ($model !== '') {
-            return $model;
-        }
-
-        $configuredModel = trim((string) $this->config('receiptscanner.model', ''));
-
-        if ($configuredModel !== '') {
-            return $configuredModel;
-        }
-
-        $providerDefault = trim((string) $this->config('receiptscanner.providers.gemini.default_model', ''));
-
-        return $providerDefault !== '' ? $providerDefault : 'gemini-3.5-flash';
-    }
-
-    private function endpointUrl(string $model): string
-    {
-        $baseUrl = rtrim((string) $this->config(
-            'receiptscanner.providers.gemini.base_url',
-            'https://generativelanguage.googleapis.com/v1beta'
-        ), '/');
-
-        $modelPath = str_starts_with($model, 'models/') ? $model : 'models/' . $model;
-        $modelPath = implode('/', array_map('rawurlencode', explode('/', $modelPath)));
-
-        return $baseUrl . '/' . $modelPath . ':generateContent';
-    }
-
-    private function fileMime(mixed $file): string
-    {
-        if (is_object($file) && isset($file->mime) && is_scalar($file->mime)) {
-            return (string) $file->mime;
-        }
-
-        if (is_array($file) && isset($file['mime']) && is_scalar($file['mime'])) {
-            return (string) $file['mime'];
-        }
-
-        return '';
-    }
-
-    private function fileBase64(mixed $file): string
-    {
-        if (is_object($file) && isset($file->base64) && is_scalar($file->base64)) {
-            return (string) $file->base64;
-        }
-
-        if (is_array($file) && isset($file['base64']) && is_scalar($file['base64'])) {
-            return (string) $file['base64'];
-        }
-
-        return '';
-    }
-
-    private function config(string $key, mixed $default = null): mixed
-    {
-        if (function_exists('config')) {
-            return config($key, $default);
-        }
-
-        return $default;
-    }
-
-    /**
-     * @param array<string, mixed> $context
-     */
-    private function failure(string $message, ?int $status = null, array $context = [], ?Throwable $previous = null): ProviderException
-    {
-        $details = [];
-
-        foreach ($context as $key => $value) {
-            if (! is_scalar($value) || $value === '') {
-                continue;
-            }
-
-            $details[] = $key . '=' . (string) $value;
-        }
-
-        if ($status !== null) {
-            array_unshift($details, 'status=' . $status);
-        }
-
-        if ($details !== []) {
-            $message .= ' (' . implode(', ', $details) . ')';
-        }
-
-        return new ProviderException($message, $status ?? 0, $previous);
+        return mb_substr(trim($message), 0, 1000);
     }
 }

@@ -12,6 +12,6 @@ class ReceiptScannerSmokeTest extends TestCase
     public function test_package_boots(): void
     {
         $this->assertTrue(app()->bound(ReceiptScannerManager::class));
-        $this->assertNotNull(config('receiptscanner.provider'));
+        $this->assertNotNull(config('receiptscanner.default_provider'));
     }
 }
