@@ -172,16 +172,19 @@ class GeminiProvider
      */
     private function buildPrompt(array $fields, int $inputCount): string
     {
-        return implode("\n", [
+        $suffix = implode("\n", [
             'Extract the receipt data from the attached image(s) or PDF.',
             'Analyze all provided inputs together as one receipt. If multiple images are provided, merge them in order from top to bottom and do not duplicate line items.',
             'Return only one valid JSON object. Do not wrap it in Markdown and do not include explanatory text.',
-            'Use these top-level fields exactly: '.json_encode($fields, JSON_UNESCAPED_SLASHES).'.',
-            'Use null for missing scalar values. Use an empty array for line_items and vats when no items are visible.',
-            'Preserve numeric values as numbers when possible. Use ISO-4217 currency codes when visible.',
-            'The mcc field is a best-effort estimate only and may be null if uncertain.',
-            'Input count: '.$inputCount,
+            'Use these top-level fields exactly: ' . json_encode($fields, JSON_UNESCAPED_SLASHES) . '.',
+            'Input count: ' . $inputCount . '.',
         ]);
+        $base = config('receiptscanner.prompt.extraction');
+        $base = is_string($base) ? trim($base) : '';
+        if ($base === '') {
+            return trim($suffix);
+        }
+        return $base . "\n\n" . trim($suffix);
     }
 
     /**

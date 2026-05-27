@@ -157,12 +157,19 @@ class AnthropicProvider
 
     private function systemPrompt(): string
     {
-        return 'You are a precise receipt extraction engine. Analyze all supplied receipt images together as one receipt, especially when the receipt is split across multiple photos. Extract only information present in the supplied receipt image or PDF. Use null when a requested scalar value is unknown, use an empty array when no line items are visible, and do not invent merchants, dates, currencies, totals, tax values, VAT values, MCCs, confidence scores, or metadata. Always return VAT breakdown as vats[] rows with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
+        $prompt = config('receiptscanner.prompt.extraction');
+        $prompt = is_string($prompt) ? trim($prompt) : '';
+        if ($prompt !== '') {
+            return $prompt;
+        }
+        return 'You are a receipt extraction engine. Return structured JSON via the extract_receipt_json tool.';
     }
 
     private function userPrompt(array $fields): string
     {
-        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. Analyze all provided images as one combined receipt. Return values for these package fields exactly when requested: '.implode(', ', $fields).'. Preserve the package schema: merchant, date, total, amount, currency, line_items, mcc, confidence, metadata, and vats. Do not return legacy tax or vat scalar fields when vats is requested. Dates should be ISO-8601 when the receipt provides enough information. Currency should be an ISO-4217 code when it can be inferred from the receipt. Line items should be an array of objects.';
+        return 'Extract the receipt into structured JSON using the extract_receipt_json tool. '
+        . 'Analyze all provided images as one combined receipt. '
+        . 'Return values for these package fields exactly when requested: ' . implode(', ', $fields) . '.';
     }
 
     private function toolInputSchema(array $fields): array
@@ -506,8 +513,8 @@ class AnthropicProvider
                 return [
                     'vat_rate' => $this->numericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
                     'amount_excluding_vat' => $this->numericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['amount'] ?? null),
-                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? null),
-                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['total'] ?? null),
+                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? $row['tax'] ?? null),
+                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['total'] ?? $row['amount'] ?? null),
                 ];
             }, $vats));
         }

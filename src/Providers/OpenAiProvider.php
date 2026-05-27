@@ -156,14 +156,15 @@ class OpenAiProvider
     {
         $inputType = (string) ($context['input_type'] ?? 'images');
         $isPdf = strtolower($inputType) === 'pdf';
-
-        return 'Extract receipt data from the attached ' . ($isPdf ? 'PDF' : 'image(s)') . '. '
+        $suffix = 'Extract receipt data from the attached ' . ($isPdf ? 'PDF' : 'image(s)') . '. '
             . 'Analyze all provided pages/images together as one receipt and return a single JSON object only. '
-            . 'Use null for unknown scalar values and [] for unknown arrays. '
-            . 'Do not invent data. '
-            . 'Do not include any tax field; use vat_amount instead. '
-            . 'Include vats only when requested. '
             . 'Requested fields: ' . implode(', ', $fields) . '.';
+        $base = config('receiptscanner.prompt.extraction');
+        $base = is_string($base) ? trim($base) : '';
+        if ($base === '') {
+            return trim($suffix);
+        }
+        return $base . "\n\n" . trim($suffix);
     }
 
     /**
@@ -567,10 +568,10 @@ class OpenAiProvider
             }
 
             $normalized[] = [
-                'vat_rate' => $this->numericValue($row['vat_rate'] ?? null),
-                'amount_excluding_vat' => $this->numericValue($row['amount_excluding_vat'] ?? null),
-                'vat_amount' => $this->numericValue($row['vat_amount'] ?? ($row['vat'] ?? ($row['tax'] ?? null))),
-                'amount_including_vat' => $this->numericValue($row['amount_including_vat'] ?? null),
+                'vat_rate' => $this->numericValue($row['vat_rate'] ?? ($row['rate'] ?? null)),
+                'amount_excluding_vat' => $this->numericValue($row['amount_excluding_vat'] ?? ($row['net_amount'] ?? ($row['net'] ?? null))),
+                'vat_amount' => $this->numericValue($row['vat_amount'] ?? ($row['tax_amount'] ?? ($row['vat'] ?? ($row['tax'] ?? null)))),
+                'amount_including_vat' => $this->numericValue($row['amount_including_vat'] ?? ($row['gross_amount'] ?? ($row['gross'] ?? null))),
             ];
         }
 

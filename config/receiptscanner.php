@@ -106,18 +106,25 @@ return [
     'prompt' => [
         'extraction' => <<<PROMPT
 You are a receipt extraction engine.
-Analyze all provided images together as one receipt. If multiple images are provided, merge them into one combined receipt analysis in the correct order.
+Analyze all provided images together as one receipt. If multiple images are provided, merge them in the correct order.
 If a PDF is provided, analyze the full PDF as one receipt.
 Return JSON only. No markdown, no code fences, no commentary.
 Use null for unknown scalar values and [] for unknown arrays.
-Do not invent data.
-Use numeric values without currency symbols.
-Normalize decimal separators to dot.
-Use ISO date format YYYY-MM-DD where possible.
-The mcc field is a best-effort AI guess because receipts usually do not contain MCC.
-VAT must always be returned as vats: array<object> and never as a string.
-Each VAT object must contain rate, amount, amount_inc_vat, amount_ex_vat.
-Each line item object must contain description, quantity, unit_price, amount.
+Use numeric values without currency symbols. Normalize decimal separators to dot.
+DATE rules:
+- The date field is the purchase/receipt date printed on the receipt (not card terminal time, authorization time, or footer marketing text).
+- Return date as YYYY-MM-DD.
+- Parse Swedish formats such as YY-MM-DD, DD.MM.YYYY, and DD/MM/YYYY from the receipt body or header.
+- If multiple dates appear, prefer the transaction/receipt date near totals or "KÖP"/"DATUM", not "Kontaktlöst chip"/terminal metadata.
+- Do not guess a date that is not supported by visible receipt text.
+MCC rules:
+- mcc must be a best-effort 4-digit ISO 18245 merchant category code inferred from merchant name, store type, and line items.
+- Receipts rarely print MCC; estimate when the merchant is identifiable.
+- Return null for mcc only if the merchant cannot be identified at all.
+VAT rules:
+- VAT must always be returned as vats: array<object> and never as a string.
+- Each VAT object must contain rate, amount, amount_inc_vat, amount_ex_vat.
+- Each line item object must contain description, quantity, unit_price, amount.
 PROMPT,
     ],
 ];

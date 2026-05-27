@@ -142,7 +142,16 @@ class AzureOpenAiProvider
 
     private function buildPrompt(array $fields): string
     {
-        return 'Extract structured receipt data from the attached receipt image or PDF. Analyze all provided images together as one receipt and merge them in order. Return only a JSON object matching the provided schema. Use null for unknown scalar values, an empty array for missing line_items, and an empty object for missing metadata. Requested top-level fields: '.implode(', ', $fields).'. VAT must be returned as vats[] with vat_rate, amount_excluding_vat, vat_amount, and amount_including_vat.';
+        $suffix = 'Extract structured receipt data from the attached receipt image or PDF. '
+        . 'Analyze all provided images together as one receipt and merge them in order. '
+        . 'Return only a JSON object matching the provided schema. '
+        . 'Requested top-level fields: ' . implode(', ', $fields) . '.';
+        $base = config('receiptscanner.prompt.extraction');
+        $base = is_string($base) ? trim($base) : '';
+        if ($base === '') {
+            return trim($suffix);
+        }
+        return $base . "\n\n" . trim($suffix);
     }
 
     private function normalizePaths(array $context): array
