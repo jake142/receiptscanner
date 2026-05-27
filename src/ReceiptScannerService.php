@@ -24,17 +24,16 @@ class ReceiptScannerService
     private const PROVIDERS = ['openai', 'azure_openai', 'gemini', 'anthropic'];
 
     /** @var array<int, string> */
-    private const DEFAULT_SECTIONS = [
+    private const DEFAULT_FIELDS = [
         'merchant',
-        'receipt',
-        'totals',
+        'total_amount',
+        'currency',
+        'date',
+        'vat_amount',
+        'mcc',
         'vats',
         'line_items',
-        'payment',
         'confidence',
-        'provider',
-        'model',
-        'raw',
     ];
 
     public function __construct(
@@ -94,19 +93,19 @@ class ReceiptScannerService
         $startedAt = microtime(true);
         $provider = $this->providerSlug();
         $model = $this->modelForProvider($provider);
-        $enabledSections = $this->enabledSections();
-        $excludedSections = $this->excludedSections();
+        $enabledFields = $this->enabledFields();
+        $excludedFields = $this->excludedFields();
         $providerResult = [];
 
         try {
             $this->validateProviderConfig($provider);
 
             $context = [
-                'prompt' => $this->prompt->build($enabledSections, $inputType),
+                'prompt' => $this->prompt->build($enabledFields, $inputType),
                 'input_type' => $inputType,
                 'files' => $files,
-                'enabled_sections' => $enabledSections,
-                'excluded_sections' => $excludedSections,
+                'enabled_fields' => $enabledFields,
+                'excluded_fields' => $excludedFields,
                 'model' => $model,
                 'is_repair' => false,
                 'raw_text' => null,
@@ -118,11 +117,11 @@ class ReceiptScannerService
 
             if ($decoded === null) {
                 $repairContext = [
-                    'prompt' => $this->prompt->repair($enabledSections, $inputType, $this->safeRawText($providerResult['text'] ?? null)),
+                    'prompt' => $this->prompt->repair($enabledFields, $inputType, $this->safeRawText($providerResult['text'] ?? null)),
                     'input_type' => $inputType,
                     'files' => [],
-                    'enabled_sections' => $enabledSections,
-                    'excluded_sections' => $excludedSections,
+                    'enabled_fields' => $enabledFields,
+                    'excluded_fields' => $excludedFields,
                     'model' => $model,
                     'is_repair' => true,
                     'raw_text' => $this->safeRawText($providerResult['text'] ?? null),
@@ -139,9 +138,9 @@ class ReceiptScannerService
                 }
             }
 
-            $result = $this->finalizeResult($decoded, $enabledSections, $providerResult, $inputType, count($files));
+            $result = $this->finalizeResult($decoded, $enabledFields);
 
-            $this->logSuccess($provider, $model, $inputType, $files, $enabledSections, $excludedSections, $providerResult, $startedAt);
+            $this->logSuccess($provider, $model, $inputType, $files, $enabledFields, $excludedFields, $providerResult, $startedAt);
 
             return $result;
         } catch (Throwable $exception) {
@@ -152,7 +151,7 @@ class ReceiptScannerService
 
     private function providerSlug(): string
     {
-        $provider = strtolower(trim((string) config('receiptscanner.provider', 'openai')));
+        $provider = strtolower(trim((string) config('receiptscanner.provider', config('receiptscanner.default_provider', 'openai'))));
 
         if (! in_array($provider, self::PROVIDERS, true)) {
             throw new ReceiptScannerException(sprintf(
@@ -250,21 +249,20 @@ class ReceiptScannerService
     /**
      * @return array<int, string>
      */
-    private function enabledSections(): array
+    private function enabledFields(): array
     {
-        $fields = config('receiptscanner.fields', []);
-        $excluded = $this->excludedSections();
+        $fields = config('receiptscanner.enabled_fields', []);
         $enabled = [];
 
-        foreach (self::DEFAULT_SECTIONS as $section) {
+        foreach (self::DEFAULT_FIELDS as $field) {
             $isEnabled = true;
 
-            if (is_array($fields) && array_key_exists($section, $fields)) {
-                $isEnabled = filter_var($fields[$section], FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? (bool) $fields[$section];
+            if (is_array($fields) && array_key_exists($field, $fields)) {
+                $isEnabled = filter_var($fields[$field], FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? (bool) $fields[$field];
             }
 
-            if ($isEnabled && ! in_array($section, $excluded, true)) {
-                $enabled[] = $section;
+            if ($isEnabled) {
+                $enabled[] = $field;
             }
         }
 
@@ -274,7 +272,7 @@ class ReceiptScannerService
     /**
      * @return array<int, string>
      */
-    private function excludedSections(): array
+    private function excludedFields(): array
     {
         $exclude = config('receiptscanner.exclude', []);
 
@@ -287,9 +285,9 @@ class ReceiptScannerService
         }
 
         return array_values(array_unique(array_filter(array_map(
-            static fn (mixed $section): string => strtolower(trim((string) $section)),
+            static fn (mixed $field): string => strtolower(trim((string) $field)),
             $exclude,
-        ), static fn (string $section): bool => $section !== '')));
+        ), static fn (string $field): bool => $field !== '')));
     }
 
     /**
@@ -343,128 +341,34 @@ class ReceiptScannerService
 
     /**
      * @param array<string, mixed> $decoded
-     * @param array<int, string> $enabledSections
-     * @param array<string, mixed> $providerResult
+     * @param array<int, string> $enabledFields
      * @return array<string, mixed>
      */
-    private function finalizeResult(array $decoded, array $enabledSections, array $providerResult, string $inputType, int $fileCount): array
+    private function finalizeResult(array $decoded, array $enabledFields): array
     {
         $result = [];
 
-        $result['merchant'] = $this->normalizeMerchant($decoded['merchant'] ?? null);
-        $result['receipt'] = $this->normalizeReceipt($decoded['receipt'] ?? null);
-        $result['totals'] = $this->normalizeTotals($decoded['totals'] ?? null, $decoded);
-        $result['vats'] = $this->normalizeVats($decoded['vats'] ?? null, $decoded);
-        $result['line_items'] = $this->normalizeLineItems($decoded['line_items'] ?? null);
-        $result['payment'] = $this->normalizePayment($decoded['payment'] ?? null);
-        $result['confidence'] = $this->normalizeNullableNumber($decoded['confidence'] ?? null);
-        $result['provider'] = isset($providerResult['provider']) && is_scalar($providerResult['provider']) ? (string) $providerResult['provider'] : (string) config('receiptscanner.provider', 'openai');
-        $result['model'] = isset($providerResult['model']) && is_scalar($providerResult['model']) ? (string) $providerResult['model'] : $this->modelForProvider($result['provider']);
-        $result['raw'] = null;
-
-        if (! in_array('merchant', $enabledSections, true)) {
-            unset($result['merchant']);
-        }
-        if (! in_array('receipt', $enabledSections, true)) {
-            unset($result['receipt']);
-        }
-        if (! in_array('totals', $enabledSections, true)) {
-            unset($result['totals']);
-        }
-        if (! in_array('vats', $enabledSections, true)) {
-            unset($result['vats']);
-        }
-        if (! in_array('line_items', $enabledSections, true)) {
-            unset($result['line_items']);
-        }
-        if (! in_array('payment', $enabledSections, true)) {
-            unset($result['payment']);
-        }
-        if (! in_array('confidence', $enabledSections, true)) {
-            unset($result['confidence']);
-        }
-        if (! in_array('provider', $enabledSections, true)) {
-            unset($result['provider']);
-        }
-        if (! in_array('model', $enabledSections, true)) {
-            unset($result['model']);
-        }
-        if (! in_array('raw', $enabledSections, true)) {
-            unset($result['raw']);
-        }
-
-        return $result;
-    }
-
-    private function normalizeMerchant(mixed $value): array
-    {
-        $value = is_array($value) ? $value : [];
-
-        return [
-            'name' => $this->normalizeNullableString($value['name'] ?? null),
-            'organization_number' => $this->normalizeNullableString($value['organization_number'] ?? null),
-            'address' => $this->normalizeNullableString($value['address'] ?? null),
+        $canonical = [
+            'merchant' => $this->normalizeNullableString($decoded['merchant'] ?? null),
+            'total_amount' => $this->normalizeNullableNumber($decoded['total_amount'] ?? $decoded['amount'] ?? null),
+            'currency' => $this->normalizeNullableString($decoded['currency'] ?? null),
+            'date' => $this->normalizeNullableDate($decoded['date'] ?? null),
+            'vat_amount' => $this->normalizeNullableNumber($decoded['vat_amount'] ?? $decoded['tax_amount'] ?? $decoded['vat'] ?? null),
+            'mcc' => $this->normalizeNullableString($decoded['mcc'] ?? null),
+            'vats' => $this->normalizeVats($decoded['vats'] ?? null, $decoded),
+            'line_items' => $this->normalizeLineItems($decoded['line_items'] ?? null),
+            'confidence' => $this->normalizeConfidence($decoded['confidence'] ?? null),
         ];
-    }
 
-    private function normalizeReceipt(mixed $value): array
-    {
-        $value = is_array($value) ? $value : [];
-
-        return [
-            'receipt_number' => $this->normalizeNullableString($value['receipt_number'] ?? null),
-            'purchase_date' => $this->normalizeNullableDate($value['purchase_date'] ?? ($value['date'] ?? null)),
-            'purchase_time' => $this->normalizeNullableTime($value['purchase_time'] ?? null),
-            'currency' => $this->normalizeNullableString($value['currency'] ?? null),
-            'mcc' => $this->normalizeNullableString($value['mcc'] ?? null),
-        ];
-    }
-
-    private function normalizeTotals(mixed $value, array $decoded = []): array
-    {
-        $value = is_array($value) ? $value : [];
-
-        return [
-            'amount_excluding_vat' => $this->normalizeNullableNumber($value['amount_excluding_vat'] ?? $decoded['amount_excluding_vat'] ?? null),
-            'vat_amount' => $this->normalizeNullableNumber($value['vat_amount'] ?? $decoded['vat_amount'] ?? $decoded['tax_amount'] ?? null),
-            'amount_including_vat' => $this->normalizeNullableNumber($value['amount_including_vat'] ?? ($value['amount'] ?? ($decoded['amount'] ?? $decoded['total'] ?? null))),
-            'rounding' => $this->normalizeNullableNumber($value['rounding'] ?? null),
-        ];
-    }
-
-    private function normalizeVats(mixed $value, array $decoded = []): array
-    {
-        $rows = is_array($value) ? $value : [];
-
-        if ($rows === []) {
-            $legacyVat = $decoded['vat'] ?? $decoded['tax'] ?? null;
-            if (is_array($legacyVat)) {
-                $rows = $legacyVat;
-            } elseif ($legacyVat !== null) {
-                $rows = [[
-                    'vat_rate' => $decoded['vat_rate'] ?? $decoded['tax_rate'] ?? null,
-                    'amount_excluding_vat' => $decoded['amount_excluding_vat'] ?? null,
-                    'vat_amount' => $legacyVat,
-                    'amount_including_vat' => $decoded['amount_including_vat'] ?? ($decoded['amount'] ?? null),
-                ]];
-            }
-        }
-
-        $normalized = [];
-        foreach ($rows as $item) {
-            if (! is_array($item)) {
+        foreach (self::DEFAULT_FIELDS as $field) {
+            if (! in_array($field, $enabledFields, true)) {
                 continue;
             }
 
-            $normalized[] = [
-                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? $item['rate'] ?? null),
-                'amount_excluding_vat' => $this->normalizeNullableNumber($item['amount_excluding_vat'] ?? $item['net_amount'] ?? null),
-                'vat_amount' => $this->normalizeNullableNumber($item['vat_amount'] ?? $item['tax_amount'] ?? $item['vat'] ?? $item['tax'] ?? null),
-                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? $item['gross_amount'] ?? null),
-            ];
+            $result[$field] = $canonical[$field];
         }
 
-        return $normalized;
+        return $result;
     }
 
     private function normalizeLineItems(mixed $value): array
@@ -483,23 +387,46 @@ class ReceiptScannerService
                 'description' => $this->normalizeNullableString($item['description'] ?? null),
                 'quantity' => $this->normalizeNullableNumber($item['quantity'] ?? null),
                 'unit_price' => $this->normalizeNullableNumber($item['unit_price'] ?? null),
-                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? ($item['amount'] ?? null)),
-                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? null),
-                'category' => $this->normalizeNullableString($item['category'] ?? null),
+                'amount' => $this->normalizeNullableNumber($item['amount'] ?? $item['amount_including_vat'] ?? null),
             ];
         }
 
         return $normalized;
     }
 
-    private function normalizePayment(mixed $value): array
+    private function normalizeVats(mixed $value, array $decoded = []): array
     {
-        $value = is_array($value) ? $value : [];
+        $rows = is_array($value) ? $value : [];
 
-        return [
-            'method' => $this->normalizeNullableString($value['method'] ?? null),
-            'card_last4' => $this->normalizeNullableString($value['card_last4'] ?? null),
-        ];
+        if ($rows === []) {
+            $legacyVat = $decoded['vat'] ?? $decoded['tax'] ?? null;
+            if (is_array($legacyVat)) {
+                $rows = $legacyVat;
+            } elseif ($legacyVat !== null || isset($decoded['vat_amount']) || isset($decoded['tax_amount'])) {
+                $rows = [[
+                    'rate' => $decoded['vat_rate'] ?? $decoded['tax_rate'] ?? null,
+                    'amount' => $decoded['vat_amount'] ?? $decoded['tax_amount'] ?? $legacyVat,
+                    'amount_inc_vat' => $decoded['total_amount'] ?? $decoded['amount'] ?? null,
+                    'amount_ex_vat' => $decoded['amount_excluding_vat'] ?? null,
+                ]];
+            }
+        }
+
+        $normalized = [];
+        foreach ($rows as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $normalized[] = [
+                'rate' => $this->normalizeNullableNumber($item['rate'] ?? $item['vat_rate'] ?? null),
+                'amount' => $this->normalizeNullableNumber($item['amount'] ?? $item['vat_amount'] ?? $item['tax_amount'] ?? null),
+                'amount_inc_vat' => $this->normalizeNullableNumber($item['amount_inc_vat'] ?? $item['amount_including_vat'] ?? $item['gross_amount'] ?? null),
+                'amount_ex_vat' => $this->normalizeNullableNumber($item['amount_ex_vat'] ?? $item['amount_excluding_vat'] ?? $item['net_amount'] ?? null),
+            ];
+        }
+
+        return $normalized;
     }
 
     private function normalizeNullableString(mixed $value): ?string
@@ -552,14 +479,19 @@ class ReceiptScannerService
         return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : null;
     }
 
-    private function normalizeNullableTime(mixed $value): ?string
+    private function normalizeConfidence(mixed $value): ?float
     {
-        $value = $this->normalizeNullableString($value);
-        if ($value === null) {
+        $confidence = $this->normalizeNullableNumber($value);
+
+        if ($confidence === null) {
             return null;
         }
 
-        return preg_match('/^\d{2}:\d{2}$/', $value) === 1 ? $value : null;
+        if ($confidence < 0.0 || $confidence > 1.0) {
+            throw new ReceiptScannerException('ReceiptScanner confidence must be between 0 and 1.');
+        }
+
+        return $confidence;
     }
 
     private function safeRawText(mixed $text): string
@@ -573,8 +505,8 @@ class ReceiptScannerService
 
     /**
      * @param array<int, FileInput> $files
-     * @param array<int, string> $enabledSections
-     * @param array<int, string> $excludedSections
+     * @param array<int, string> $enabledFields
+     * @param array<int, string> $excludedFields
      * @param array<string, mixed> $providerResult
      */
     private function logSuccess(
@@ -582,8 +514,8 @@ class ReceiptScannerService
         string $model,
         string $inputType,
         array $files,
-        array $enabledSections,
-        array $excludedSections,
+        array $enabledFields,
+        array $excludedFields,
         array $providerResult,
         float $startedAt,
     ): void {
@@ -598,8 +530,8 @@ class ReceiptScannerService
             'image_count' => $inputType === 'images' ? count($files) : null,
             'mime_types' => $this->fileMimes($files),
             'approximate_file_sizes' => $this->fileSizes($files),
-            'enabled_sections' => $enabledSections,
-            'excluded_sections' => $excludedSections,
+            'enabled_fields' => $enabledFields,
+            'excluded_fields' => $excludedFields,
             'duration_ms' => $this->durationMs($startedAt),
             'request_id' => isset($providerResult['request_id']) && is_scalar($providerResult['request_id']) ? (string) $providerResult['request_id'] : null,
             'response_id' => isset($providerResult['response_id']) && is_scalar($providerResult['response_id']) ? (string) $providerResult['response_id'] : null,

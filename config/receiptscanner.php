@@ -86,17 +86,16 @@ return [
     |
     */
 
-    'fields' => [
+    'enabled_fields' => [
         'merchant' => true,
-        'receipt' => true,
-        'totals' => true,
+        'total_amount' => true,
+        'currency' => true,
+        'date' => true,
+        'vat_amount' => true,
+        'mcc' => true,
         'vats' => true,
         'line_items' => true,
-        'payment' => true,
         'confidence' => true,
-        'provider' => true,
-        'model' => true,
-        'raw' => true,
     ],
 
     'exclude' => array_values(array_filter(array_map(
@@ -117,7 +116,8 @@ Normalize decimal separators to dot.
 Use ISO date format YYYY-MM-DD where possible.
 The mcc field is a best-effort AI guess because receipts usually do not contain MCC.
 VAT must always be returned as vats: array<object> and never as a string.
-Each VAT object must contain vat_rate, amount_excluding_vat, vat_amount, amount_including_vat.
+Each VAT object must contain rate, amount, amount_inc_vat, amount_ex_vat.
+Each line item object must contain description, quantity, unit_price, amount.
 PROMPT,
     ],
 ];

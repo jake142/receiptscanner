@@ -45,11 +45,14 @@ class ReceiptPrompt
             $inputInstruction,
             '',
             'Return JSON only. Do not wrap the JSON in markdown. Do not add commentary, explanations, code fences, or prose outside the JSON object.',
+            'Return only valid JSON matching the exact schema below. No wrapper object, no extra fields, no aliases, no markdown, no comments, and no explanation.',
             'Use the exact top-level keys shown in the expected JSON shape. Omit every top-level field that is not shown.',
             'Use null for unknown scalar values. Use [] for unknown arrays.',
             'Do not invent data. If a value is unclear, return null.',
             'The mcc field is a best-effort AI estimate only. Receipts generally do not contain MCC, so infer it from the merchant and receipt context.',
             'VAT breakdown must always be vats: array<object>. Never return vats as a string.',
+            'line_items must always be an array of objects with description, quantity, unit_price, and amount.',
+            'vats must always be an array of objects with rate, amount, amount_inc_vat, and amount_ex_vat.',
             'Use numeric values without currency symbols. Normalize decimal separators to dot. Use ISO dates where possible.',
             '',
             'Expected JSON shape:',
@@ -113,11 +116,10 @@ class ReceiptPrompt
                 'vat_amount' => null,
                 'mcc' => null,
                 'vats' => [[
-                    // Canonical VAT keys expected by ReceiptScannerManagerTest
-                    'vat_rate' => null,
-                    'vat_amount' => null,
-                    'amount_excluding_vat' => null,
-                    'amount_including_vat' => null,
+                    'rate' => null,
+                    'amount' => null,
+                    'amount_inc_vat' => null,
+                    'amount_ex_vat' => null,
                 ]],
                 'line_items' => [[
                     'description' => null,
@@ -157,10 +159,10 @@ class ReceiptPrompt
                 'vats' => [
                     'type' => 'array',
                     'items' => $this->objectSchema([
-                        'vat_rate' => $this->nullableNumberSchema(),
-                        'vat_amount' => $this->nullableNumberSchema(),
-                        'amount_excluding_vat' => $this->nullableNumberSchema(),
-                        'amount_including_vat' => $this->nullableNumberSchema(),
+                        'rate' => $this->nullableNumberSchema(),
+                        'amount' => $this->nullableNumberSchema(),
+                        'amount_inc_vat' => $this->nullableNumberSchema(),
+                        'amount_ex_vat' => $this->nullableNumberSchema(),
                     ]),
                 ],
                 'line_items' => [
