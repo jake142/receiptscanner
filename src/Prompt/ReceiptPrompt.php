@@ -15,13 +15,15 @@ class ReceiptPrompt
      */
     private const FIELDS = [
         'merchant',
-        'date',
-        'amount',
-        'currency',
-        'vat_amount',
-        'line_items',
-        'mcc',
+        'receipt',
+        'totals',
         'vats',
+        'line_items',
+        'payment',
+        'confidence',
+        'provider',
+        'model',
+        'raw',
     ];
 
     /**
@@ -47,8 +49,9 @@ class ReceiptPrompt
             'Use the exact top-level keys shown in the expected JSON shape. Omit every top-level field that is not shown.',
             'Use null for unknown scalar values. Use [] for unknown arrays.',
             'Do not invent data. If a value is unclear, return null.',
-            'Do not include any field named tax. The total VAT amount must be named vat_amount.',
             'The mcc field is a best-effort AI estimate only. Receipts generally do not contain MCC, so infer it from the merchant and receipt context.',
+            'VAT breakdown must always be vats: array<object>. Never return vats as a string.',
+            'Use numeric values without currency symbols. Normalize decimal separators to dot. Use ISO dates where possible.',
             '',
             'Expected JSON shape:',
             $this->encodeJson($schema),
@@ -104,20 +107,46 @@ class ReceiptPrompt
 
         foreach ($fields as $field) {
             $json[$field] = match ($field) {
-                'merchant', 'date', 'currency', 'mcc' => null,
-                'amount', 'vat_amount' => null,
+                'merchant' => [
+                    'name' => null,
+                    'organization_number' => null,
+                    'address' => null,
+                ],
+                'receipt' => [
+                    'receipt_number' => null,
+                    'purchase_date' => null,
+                    'purchase_time' => null,
+                    'currency' => null,
+                    'mcc' => null,
+                ],
+                'totals' => [
+                    'amount_excluding_vat' => null,
+                    'vat_amount' => null,
+                    'amount_including_vat' => null,
+                    'rounding' => null,
+                ],
+                'vats' => [[
+                    'vat_rate' => null,
+                    'amount_excluding_vat' => null,
+                    'vat_amount' => null,
+                    'amount_including_vat' => null,
+                ]],
                 'line_items' => [[
                     'description' => null,
                     'quantity' => null,
                     'unit_price' => null,
-                    'amount' => null,
-                ]],
-                'vats' => [[
-                    'vat_amount' => null,
-                    'vat_rate' => null,
                     'amount_including_vat' => null,
-                    'amount_excluding_vat' => null,
+                    'vat_rate' => null,
+                    'category' => null,
                 ]],
+                'payment' => [
+                    'method' => null,
+                    'card_last4' => null,
+                ],
+                'confidence' => null,
+                'provider' => null,
+                'model' => null,
+                'raw' => null,
                 default => null,
             };
         }
@@ -140,26 +169,52 @@ class ReceiptPrompt
 
         foreach ($fields as $field) {
             $properties[$field] = match ($field) {
-                'merchant', 'date', 'currency', 'mcc' => $this->nullableStringSchema(),
-                'amount', 'vat_amount' => $this->nullableNumberSchema(),
+                'merchant' => $this->objectSchema([
+                    'name' => $this->nullableStringSchema(),
+                    'organization_number' => $this->nullableStringSchema(),
+                    'address' => $this->nullableStringSchema(),
+                ]),
+                'receipt' => $this->objectSchema([
+                    'receipt_number' => $this->nullableStringSchema(),
+                    'purchase_date' => $this->nullableStringSchema(),
+                    'purchase_time' => $this->nullableStringSchema(),
+                    'currency' => $this->nullableStringSchema(),
+                    'mcc' => $this->nullableStringSchema(),
+                ]),
+                'totals' => $this->objectSchema([
+                    'amount_excluding_vat' => $this->nullableNumberSchema(),
+                    'vat_amount' => $this->nullableNumberSchema(),
+                    'amount_including_vat' => $this->nullableNumberSchema(),
+                    'rounding' => $this->nullableNumberSchema(),
+                ]),
+                'vats' => [
+                    'type' => 'array',
+                    'items' => $this->objectSchema([
+                        'vat_rate' => $this->nullableNumberSchema(),
+                        'amount_excluding_vat' => $this->nullableNumberSchema(),
+                        'vat_amount' => $this->nullableNumberSchema(),
+                        'amount_including_vat' => $this->nullableNumberSchema(),
+                    ]),
+                ],
                 'line_items' => [
                     'type' => 'array',
                     'items' => $this->objectSchema([
                         'description' => $this->nullableStringSchema(),
                         'quantity' => $this->nullableNumberSchema(),
                         'unit_price' => $this->nullableNumberSchema(),
-                        'amount' => $this->nullableNumberSchema(),
-                    ]),
-                ],
-                'vats' => [
-                    'type' => 'array',
-                    'items' => $this->objectSchema([
-                        'vat_amount' => $this->nullableNumberSchema(),
-                        'vat_rate' => $this->nullableNumberSchema(),
                         'amount_including_vat' => $this->nullableNumberSchema(),
-                        'amount_excluding_vat' => $this->nullableNumberSchema(),
+                        'vat_rate' => $this->nullableNumberSchema(),
+                        'category' => $this->nullableStringSchema(),
                     ]),
                 ],
+                'payment' => $this->objectSchema([
+                    'method' => $this->nullableStringSchema(),
+                    'card_last4' => $this->nullableStringSchema(),
+                ]),
+                'confidence' => $this->nullableNumberSchema(),
+                'provider' => $this->nullableStringSchema(),
+                'model' => $this->nullableStringSchema(),
+                'raw' => ['type' => ['null']],
                 default => $this->nullableStringSchema(),
             };
         }

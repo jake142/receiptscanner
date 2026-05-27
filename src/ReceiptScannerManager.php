@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Jake142\ReceiptScanner;
 
 use Illuminate\Support\Arr;
@@ -18,6 +20,9 @@ class ReceiptScannerManager
         private ?GeminiProvider $geminiProvider = null,
         private ?AnthropicProvider $anthropicProvider = null,
     ) {
+        // Do not touch/normalize receiptscanner.provider config here.
+        // Provider selection must be driven by config('receiptscanner.default_provider')
+        // (and optionally options['provider']).
         $this->openAiProvider ??= new OpenAiProvider();
         $this->azureOpenAiProvider ??= new AzureOpenAiProvider();
         $this->geminiProvider ??= new GeminiProvider();
@@ -117,7 +122,11 @@ class ReceiptScannerManager
      */
     private function providerSlug(array $options): string
     {
-        $provider = $options['provider'] ?? config('receiptscanner.default_provider', 'openai');
+        // Primary source of truth for the default provider is receiptscanner.default_provider.
+        // (The config file also contains receiptscanner.provider for backward compatibility.)
+        $provider = $options['provider']
+            ?? config('receiptscanner.default_provider')
+            ?? config('receiptscanner.provider', 'openai');
 
         if (! is_string($provider) || trim($provider) === '') {
             throw new InvalidArgumentException('ReceiptScanner provider must be a non-empty string.');

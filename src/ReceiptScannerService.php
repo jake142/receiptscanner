@@ -28,12 +28,13 @@ class ReceiptScannerService
         'merchant',
         'receipt',
         'totals',
-        'vat_breakdown',
+        'vats',
         'line_items',
-        'mcc',
+        'payment',
         'confidence',
-        'warnings',
-        'metadata',
+        'provider',
+        'model',
+        'raw',
     ];
 
     public function __construct(
@@ -46,8 +47,6 @@ class ReceiptScannerService
     }
 
     /**
-     * Scan one receipt represented by one or more image files.
-     *
      * @param array<int, mixed> $images
      * @return array<string, mixed>
      */
@@ -72,8 +71,6 @@ class ReceiptScannerService
     }
 
     /**
-     * Scan one receipt represented by exactly one PDF file.
-     *
      * @param mixed $pdf
      * @return array<string, mixed>
      */
@@ -244,8 +241,8 @@ class ReceiptScannerService
 
         return $default !== '' ? $default : match ($provider) {
             'openai', 'azure_openai' => 'gpt-5.4-nano',
-            'gemini' => 'gemini-3.5-flash',
-            'anthropic' => 'claude-sonnet-4-6',
+            'gemini' => 'gemini-2.5-pro',
+            'anthropic' => 'claude-sonnet-4-20250514',
             default => 'unknown',
         };
     }
@@ -352,29 +349,205 @@ class ReceiptScannerService
      */
     private function finalizeResult(array $decoded, array $enabledSections, array $providerResult, string $inputType, int $fileCount): array
     {
-        $allowed = array_fill_keys(array_merge(['schema_version'], $enabledSections), true);
         $result = [];
 
-        $result['schema_version'] = isset($decoded['schema_version']) && is_scalar($decoded['schema_version'])
-            ? (string) $decoded['schema_version']
-            : '1.0';
+        $result['merchant'] = $this->normalizeMerchant($decoded['merchant'] ?? null);
+        $result['receipt'] = $this->normalizeReceipt($decoded['receipt'] ?? null);
+        $result['totals'] = $this->normalizeTotals($decoded['totals'] ?? null);
+        $result['vats'] = $this->normalizeVats($decoded['vats'] ?? null);
+        $result['line_items'] = $this->normalizeLineItems($decoded['line_items'] ?? null);
+        $result['payment'] = $this->normalizePayment($decoded['payment'] ?? null);
+        $result['confidence'] = $this->normalizeNullableNumber($decoded['confidence'] ?? null);
+        $result['provider'] = isset($providerResult['provider']) && is_scalar($providerResult['provider']) ? (string) $providerResult['provider'] : (string) config('receiptscanner.provider', 'openai');
+        $result['model'] = isset($providerResult['model']) && is_scalar($providerResult['model']) ? (string) $providerResult['model'] : $this->modelForProvider($result['provider']);
+        $result['raw'] = null;
 
-        foreach ($enabledSections as $section) {
-            if (array_key_exists($section, $decoded)) {
-                $result[$section] = $decoded[$section];
+        if (! in_array('merchant', $enabledSections, true)) {
+            unset($result['merchant']);
+        }
+        if (! in_array('receipt', $enabledSections, true)) {
+            unset($result['receipt']);
+        }
+        if (! in_array('totals', $enabledSections, true)) {
+            unset($result['totals']);
+        }
+        if (! in_array('vats', $enabledSections, true)) {
+            unset($result['vats']);
+        }
+        if (! in_array('line_items', $enabledSections, true)) {
+            unset($result['line_items']);
+        }
+        if (! in_array('payment', $enabledSections, true)) {
+            unset($result['payment']);
+        }
+        if (! in_array('confidence', $enabledSections, true)) {
+            unset($result['confidence']);
+        }
+        if (! in_array('provider', $enabledSections, true)) {
+            unset($result['provider']);
+        }
+        if (! in_array('model', $enabledSections, true)) {
+            unset($result['model']);
+        }
+        if (! in_array('raw', $enabledSections, true)) {
+            unset($result['raw']);
+        }
+
+        return $result;
+    }
+
+    private function normalizeMerchant(mixed $value): array
+    {
+        $value = is_array($value) ? $value : [];
+
+        return [
+            'name' => $this->normalizeNullableString($value['name'] ?? null),
+            'organization_number' => $this->normalizeNullableString($value['organization_number'] ?? null),
+            'address' => $this->normalizeNullableString($value['address'] ?? null),
+        ];
+    }
+
+    private function normalizeReceipt(mixed $value): array
+    {
+        $value = is_array($value) ? $value : [];
+
+        return [
+            'receipt_number' => $this->normalizeNullableString($value['receipt_number'] ?? null),
+            'purchase_date' => $this->normalizeNullableDate($value['purchase_date'] ?? ($value['date'] ?? null)),
+            'purchase_time' => $this->normalizeNullableTime($value['purchase_time'] ?? null),
+            'currency' => $this->normalizeNullableString($value['currency'] ?? null),
+            'mcc' => $this->normalizeNullableString($value['mcc'] ?? null),
+        ];
+    }
+
+    private function normalizeTotals(mixed $value): array
+    {
+        $value = is_array($value) ? $value : [];
+
+        return [
+            'amount_excluding_vat' => $this->normalizeNullableNumber($value['amount_excluding_vat'] ?? null),
+            'vat_amount' => $this->normalizeNullableNumber($value['vat_amount'] ?? null),
+            'amount_including_vat' => $this->normalizeNullableNumber($value['amount_including_vat'] ?? ($value['amount'] ?? null)),
+            'rounding' => $this->normalizeNullableNumber($value['rounding'] ?? null),
+        ];
+    }
+
+    private function normalizeVats(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $normalized = [];
+        foreach ($value as $item) {
+            if (! is_array($item)) {
+                continue;
             }
+
+            $normalized[] = [
+                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? null),
+                'amount_excluding_vat' => $this->normalizeNullableNumber($item['amount_excluding_vat'] ?? null),
+                'vat_amount' => $this->normalizeNullableNumber($item['vat_amount'] ?? null),
+                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? null),
+            ];
         }
 
-        if (isset($allowed['metadata'])) {
-            $metadata = isset($result['metadata']) && is_array($result['metadata']) ? $result['metadata'] : [];
-            $metadata['provider'] = isset($providerResult['provider']) && is_scalar($providerResult['provider']) ? (string) $providerResult['provider'] : null;
-            $metadata['model'] = isset($providerResult['model']) && is_scalar($providerResult['model']) ? (string) $providerResult['model'] : null;
-            $metadata['input_type'] = $inputType;
-            $metadata['image_count'] = $inputType === 'images' ? $fileCount : null;
-            $result['metadata'] = $metadata;
+        return $normalized;
+    }
+
+    private function normalizeLineItems(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
         }
 
-        return array_intersect_key($result, $allowed);
+        $normalized = [];
+        foreach ($value as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $normalized[] = [
+                'description' => $this->normalizeNullableString($item['description'] ?? null),
+                'quantity' => $this->normalizeNullableNumber($item['quantity'] ?? null),
+                'unit_price' => $this->normalizeNullableNumber($item['unit_price'] ?? null),
+                'amount_including_vat' => $this->normalizeNullableNumber($item['amount_including_vat'] ?? ($item['amount'] ?? null)),
+                'vat_rate' => $this->normalizeNullableNumber($item['vat_rate'] ?? null),
+                'category' => $this->normalizeNullableString($item['category'] ?? null),
+            ];
+        }
+
+        return $normalized;
+    }
+
+    private function normalizePayment(mixed $value): array
+    {
+        $value = is_array($value) ? $value : [];
+
+        return [
+            'method' => $this->normalizeNullableString($value['method'] ?? null),
+            'card_last4' => $this->normalizeNullableString($value['card_last4'] ?? null),
+        ];
+    }
+
+    private function normalizeNullableString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_string($value)) {
+            $value = trim($value);
+            return $value === '' ? null : $value;
+        }
+
+        if (is_int($value) || is_float($value) || is_bool($value)) {
+            return (string) $value;
+        }
+
+        return null;
+    }
+
+    private function normalizeNullableNumber(mixed $value): ?float
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return (float) $value;
+        }
+
+        if (is_string($value)) {
+            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
+            if ($normalized === '' || ! is_numeric($normalized)) {
+                return null;
+            }
+
+            return (float) $normalized;
+        }
+
+        return null;
+    }
+
+    private function normalizeNullableDate(mixed $value): ?string
+    {
+        $value = $this->normalizeNullableString($value);
+        if ($value === null) {
+            return null;
+        }
+
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : null;
+    }
+
+    private function normalizeNullableTime(mixed $value): ?string
+    {
+        $value = $this->normalizeNullableString($value);
+        if ($value === null) {
+            return null;
+        }
+
+        return preg_match('/^\d{2}:\d{2}$/', $value) === 1 ? $value : null;
     }
 
     private function safeRawText(mixed $text): string

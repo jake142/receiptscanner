@@ -14,8 +14,8 @@ It is a wrapper around multimodal LLM APIs. It does not host its own OCR service
 - Supports PDF receipt analysis from one input file
 - Provider selection via config/env
 - Default provider models:
-  - OpenAI: `gpt-5`
-  - Azure OpenAI: `gpt-5`
+  - OpenAI: `gpt-5.4-nano`
+  - Azure OpenAI: `gpt-5.4-nano`
   - Gemini: `gemini-2.5-pro`
   - Anthropic: `claude-sonnet-4-20250514`
 - Configurable output fields to reduce prompt size and response size
@@ -48,27 +48,31 @@ ReceiptScanner is configured through `config/receiptscanner.php` and environment
 ### Environment variables
 
 ```env
-RECEIPT_SCANNER_PROVIDER=openai
-RECEIPT_SCANNER_MODEL=
-RECEIPT_SCANNER_TIMEOUT=60
-RECEIPT_SCANNER_RETRIES=2
-RECEIPT_SCANNER_LOGGING=false
-RECEIPT_SCANNER_INCLUDE_VATS=true
-RECEIPT_SCANNER_MAX_FILE_SIZE_MB=32
+RECEIPTSCANNER_PROVIDER=openai
+RECEIPTSCANNER_MODEL=
+RECEIPTSCANNER_TIMEOUT=60
+RECEIPTSCANNER_RETRIES=2
+RECEIPTSCANNER_MAX_FILE_SIZE_MB=32
+RECEIPTSCANNER_INCLUDE_VATS=true
+RECEIPTSCANNER_LOGGING=false
 
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5
+OPENAI_MODEL=gpt-5.4-nano
+OPENAI_BASE_URL=https://api.openai.com/v1
 
 AZURE_OPENAI_ENDPOINT=
 AZURE_OPENAI_API_KEY=
-AZURE_OPENAI_DEPLOYMENT=gpt-5
-AZURE_OPENAI_MODEL=gpt-5
+AZURE_OPENAI_DEPLOYMENT=gpt-5.4-nano
+AZURE_OPENAI_API_VERSION=
+AZURE_OPENAI_ENDPOINT_MODE=v1
 
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-pro
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 
 ANTHROPIC_API_KEY=
 ANTHROPIC_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 ```
 
 ### Config shape
@@ -76,24 +80,26 @@ ANTHROPIC_MODEL=claude-sonnet-4-20250514
 The package config is expected to expose these keys:
 
 - `default_provider`
-- `provider`
-- `model`
-- `timeout`
-- `retries`
-- `logging`
-- `include_vats`
-- `max_file_size_mb`
-- `enabled_fields`
 - `providers.openai.api_key`
 - `providers.openai.model`
+- `providers.openai.base_url`
 - `providers.azure_openai.endpoint`
 - `providers.azure_openai.api_key`
 - `providers.azure_openai.deployment`
-- `providers.azure_openai.model`
+- `providers.azure_openai.api_version`
+- `providers.azure_openai.endpoint_mode`
 - `providers.gemini.api_key`
 - `providers.gemini.model`
+- `providers.gemini.base_url`
 - `providers.anthropic.api_key`
 - `providers.anthropic.model`
+- `providers.anthropic.base_url`
+- `timeout`
+- `retries`
+- `max_file_size_mb`
+- `fields`
+- `include_vats`
+- `logging`
 
 ### Default output fields
 
@@ -108,7 +114,7 @@ By default, all fields are enabled:
 - `mcc`
 - `vats`
 
-You can disable parts of the response in config to reduce prompt size and token usage. For example, if you do not need VAT breakdowns, set `include_vats` to `false` and remove `vats` from `enabled_fields`.
+You can disable parts of the response in config to reduce prompt size and response size. For example, if you do not need VAT breakdowns, set `include_vats` to `false` and remove `vats` from `fields`.
 
 ## Usage
 
@@ -145,37 +151,86 @@ Default output shape:
 
 ```php
 [
-    'merchant' => 'Coffee Shop',
-    'date' => '2025-05-27',
-    'amount' => 18.40,
-    'currency' => 'SEK',
-    'vat_amount' => 3.68,
+    'merchant' => [
+        'name' => 'Coffee Shop',
+        'organization_number' => null,
+        'address' => null,
+    ],
+    'receipt' => [
+        'receipt_number' => null,
+        'purchase_date' => '2025-05-27',
+        'purchase_time' => null,
+        'currency' => 'SEK',
+        'mcc' => '5814',
+    ],
+    'totals' => [
+        'amount_excluding_vat' => 14.72,
+        'vat_amount' => 3.68,
+        'amount_including_vat' => 18.40,
+        'rounding' => null,
+    ],
+    'vats' => [
+        [
+            'vat_rate' => 25,
+            'amount_excluding_vat' => 14.72,
+            'vat_amount' => 3.68,
+            'amount_including_vat' => 18.40,
+        ],
+    ],
     'line_items' => [
         [
             'description' => 'Latte',
             'quantity' => 1,
             'unit_price' => 42.00,
-            'amount' => 42.00,
+            'amount_including_vat' => 42.00,
+            'vat_rate' => 25,
+            'category' => null,
         ],
     ],
-    'mcc' => '5814',
-    'vats' => [
-        [
-            'vat_amount' => 3.68,
-            'vat_rate' => 0.25,
-            'amount_including_vat' => 18.40,
-            'amount_excluding_vat' => 14.72,
-        ],
+    'payment' => [
+        'method' => 'card',
+        'card_last4' => null,
+    ],
+    'confidence' => 0.93,
+    'provider' => 'openai',
+    'model' => 'gpt-5.4-nano',
+    'raw' => null,
+]
+```
+
+VAT array example:
+
+```php
+'vats' => [
+    [
+        'vat_rate' => 25,
+        'amount_excluding_vat' => 1000,
+        'vat_amount' => 250,
+        'amount_including_vat' => 1250,
+    ],
+    [
+        'vat_rate' => 12,
+        'amount_excluding_vat' => 500,
+        'vat_amount' => 60,
+        'amount_including_vat' => 560,
+    ],
+    [
+        'vat_rate' => 6,
+        'amount_excluding_vat' => 200,
+        'vat_amount' => 12,
+        'amount_including_vat' => 212,
     ],
 ]
 ```
 
 Notes:
 
-- `tax` is not used anywhere in the output.
+- `vats` is always an array.
+- `vats` must never be a string such as `"12%"` or `"25%"`.
 - Unknown scalar values are returned as `null`.
 - Unknown arrays are returned as `[]`.
 - Dates are normalized to `YYYY-MM-DD` when possible.
+- Times are normalized to `HH:MM` when possible.
 - Numeric values are normalized to numbers, not strings, when possible.
 - `mcc` is AI-estimated because receipts usually do not contain MCC directly.
 
@@ -186,11 +241,11 @@ Set the provider and model in env, then load them through config.
 Example:
 
 ```env
-RECEIPT_SCANNER_PROVIDER=openai
-RECEIPT_SCANNER_MODEL=gpt-5
+RECEIPTSCANNER_PROVIDER=openai
+RECEIPTSCANNER_MODEL=gpt-5.4-nano
 ```
 
-Azure OpenAI is supported as well. When using Azure OpenAI, configure the Azure provider settings and use the OpenAI `gpt-5` model/deployment.
+Azure OpenAI is supported as well. When using Azure OpenAI, configure the Azure provider settings and use the OpenAI `gpt-5.4-nano` model/deployment.
 
 ## Logging
 

@@ -5,82 +5,67 @@ declare(strict_types=1);
 return [
     /*
     |--------------------------------------------------------------------------
-    | Default Receipt Scanner Provider
+    | Default Provider / Model
     |--------------------------------------------------------------------------
     |
-    | Supported providers: "openai", "azure_openai", "gemini", "anthropic".
+    | Supported providers:
+    | - openai
+    | - azure_openai
+    | - gemini
+    | - anthropic
+    |
+    | The facade/service will read these values from config, which in turn
+    | reads from env.
     |
     */
 
+    // Canonical key used by the manager/tests.
     'default_provider' => env('RECEIPTSCANNER_PROVIDER', 'openai'),
+
+    // Backward-compatible key (some hosts may still reference receiptscanner.provider).
+    // Keep it in sync with the canonical key.
+    'provider' => env('RECEIPTSCANNER_PROVIDER', env('RECEIPTSCANNER_PROVIDER', 'openai')),
+
+    'model' => env('RECEIPTSCANNER_MODEL', null),
 
     /*
     |--------------------------------------------------------------------------
     | Provider Configuration
     |--------------------------------------------------------------------------
-    |
-    | OpenAI:
-    |   OPENAI_API_KEY
-    |   OPENAI_MODEL
-    |
-    | Azure OpenAI:
-    |   AZURE_OPENAI_ENDPOINT
-    |   AZURE_OPENAI_API_KEY
-    |   AZURE_OPENAI_DEPLOYMENT
-    |   AZURE_OPENAI_API_VERSION
-    |   AZURE_OPENAI_ENDPOINT_MODE
-    |
-    | Azure endpoint modes:
-    |   v1     => {endpoint}/openai/v1/responses, without api-version query
-    |   legacy => {endpoint}/openai/responses?api-version={api_version}
-    |
-    | Gemini:
-    |   GEMINI_API_KEY
-    |   GEMINI_MODEL
-    |
-    | Anthropic:
-    |   ANTHROPIC_API_KEY
-    |   ANTHROPIC_MODEL
-    |
     */
 
     'providers' => [
         'openai' => [
             'api_key' => env('OPENAI_API_KEY'),
-            'model' => env('OPENAI_MODEL', 'gpt-5.4-nano'),
             'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+            'model' => env('OPENAI_MODEL', 'gpt-5.4-nano'),
         ],
 
         'azure_openai' => [
             'endpoint' => env('AZURE_OPENAI_ENDPOINT'),
             'api_key' => env('AZURE_OPENAI_API_KEY'),
             'deployment' => env('AZURE_OPENAI_DEPLOYMENT', 'gpt-5.4-nano'),
-            'api_version' => env('AZURE_OPENAI_API_VERSION'),
+            'api_version' => env('AZURE_OPENAI_API_VERSION', null),
             'endpoint_mode' => env('AZURE_OPENAI_ENDPOINT_MODE', 'v1'),
         ],
 
         'gemini' => [
-            'api_key' => env('GEMINI_API_KEY'),
-            'model' => env('GEMINI_MODEL', 'gemini-2.5-pro'),
+            'api_key' => env('GOOGLE_API_KEY', env('GEMINI_API_KEY')),
             'base_url' => env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'),
+            'model' => env('GEMINI_MODEL', 'gemini-2.5-pro'),
         ],
 
         'anthropic' => [
             'api_key' => env('ANTHROPIC_API_KEY'),
-            'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-4-20250514'),
             'base_url' => env('ANTHROPIC_BASE_URL', 'https://api.anthropic.com/v1'),
+            'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-4-20250514'),
         ],
     ],
 
     /*
     |--------------------------------------------------------------------------
-    | Request Options
+    | Request / Retry / Logging
     |--------------------------------------------------------------------------
-    |
-    | Timeout is expressed in seconds. Retries should be used only by provider
-    | adapters for transient upstream failures such as rate limits and 5xx
-    | responses.
-    |
     */
 
     'timeout' => (int) env('RECEIPTSCANNER_TIMEOUT', 60),
@@ -89,39 +74,55 @@ return [
 
     'max_file_size_mb' => (int) env('RECEIPTSCANNER_MAX_FILE_SIZE_MB', 32),
 
+    'logging' => [
+        'enabled' => (bool) env('RECEIPTSCANNER_LOGGING', false),
+        'log_receipt_content' => (bool) env('RECEIPTSCANNER_LOG_RECEIPT_CONTENT', false),
+        'channel' => env('RECEIPTSCANNER_LOG_CHANNEL', null),
+        'level' => env('RECEIPTSCANNER_LOG_LEVEL', 'info'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
-    | Receipt Fields
+    | Prompt / Field Exclusions
     |--------------------------------------------------------------------------
     |
-    | These fields describe the structured receipt JSON this package asks
-    | providers to return. Keep these stable to preserve backward compatibility.
+    | All fields are enabled by default. You may exclude parts to reduce the
+    | prompt size and the returned JSON payload.
     |
     */
 
     'fields' => [
-        'merchant',
-        'date',
-        'amount',
-        'currency',
-        'vat_amount',
-        'line_items',
-        'mcc',
-        'vats',
+        'merchant' => true,
+        'receipt' => true,
+        'totals' => true,
+        'vats' => true,
+        'line_items' => true,
+        'payment' => true,
+        'confidence' => true,
+        'provider' => true,
+        'model' => true,
+        'raw' => true,
     ],
 
-    'include_vats' => env('RECEIPTSCANNER_INCLUDE_VATS', true),
+    'exclude' => array_values(array_filter(array_map(
+        static fn ($value): string => is_string($value) ? trim($value) : '',
+        explode(',', (string) env('RECEIPTSCANNER_EXCLUDE', ''))
+    ))),
 
-    /*
-    |--------------------------------------------------------------------------
-    | Logging
-    |--------------------------------------------------------------------------
-    |
-    | When enabled, providers may log safe diagnostics only. API keys,
-    | Authorization headers, api-key headers, and base64 receipt/PDF/image
-    | content must never be logged.
-    |
-    */
-
-    'logging' => env('RECEIPTSCANNER_LOGGING', false),
+    'prompt' => [
+        'extraction' => <<<PROMPT
+You are a receipt extraction engine.
+Analyze all provided images together as one receipt. If multiple images are provided, merge them into one combined receipt analysis in the correct order.
+If a PDF is provided, analyze the full PDF as one receipt.
+Return JSON only. No markdown, no code fences, no commentary.
+Use null for unknown scalar values and [] for unknown arrays.
+Do not invent data.
+Use numeric values without currency symbols.
+Normalize decimal separators to dot.
+Use ISO date format YYYY-MM-DD where possible.
+The mcc field is a best-effort AI guess because receipts usually do not contain MCC.
+VAT must always be returned as vats: array<object> and never as a string.
+Each VAT object must contain vat_rate, amount_excluding_vat, vat_amount, amount_including_vat.
+PROMPT,
+    ],
 ];
