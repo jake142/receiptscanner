@@ -23,6 +23,9 @@ class ReceiptPrompt
         'vats',
         'line_items',
         'confidence',
+        'tip',
+        'purchase_country',
+        'purchase_city',
     ];
 
     /**
@@ -50,6 +53,9 @@ class ReceiptPrompt
             'Use null for unknown scalar values. Use [] for unknown arrays.',
             'Do not invent data. If a value is unclear, return null.',
             'The mcc field is a best-effort AI estimate only. Receipts generally do not contain MCC, so infer it from the merchant and receipt context.',
+            'The tip field must be a numeric tip or gratuity amount when visible on the receipt; otherwise return null.',
+            'The purchase_country field must be the purchase country when inferable from receipt text, merchant address, currency, or visible location; otherwise return null.',
+            'The purchase_city field must be the purchase city when visible or clearly inferable from receipt text or address; otherwise return null.',
             'VAT breakdown must always be vats: array<object>. Never return vats as a string.',
             'line_items must always be an array of objects with description, quantity, unit_price, and amount.',
             'vats must always be an array of objects with rate, amount, amount_inc_vat, and amount_ex_vat.',
@@ -128,6 +134,9 @@ class ReceiptPrompt
                     'amount' => null,
                 ]],
                 'confidence' => null,
+                'tip' => null,
+                'purchase_country' => null,
+                'purchase_city' => null,
                 default => null,
             };
         }
@@ -175,6 +184,9 @@ class ReceiptPrompt
                     ]),
                 ],
                 'confidence' => $this->nullableNumberSchema(),
+                'tip' => $this->nullableNumberSchema(),
+                'purchase_country' => $this->nullableStringSchema(),
+                'purchase_city' => $this->nullableStringSchema(),
                 default => $this->nullableStringSchema(),
             };
         }

@@ -101,6 +101,9 @@ By default, all fields are enabled:
 - `vats`
 - `line_items`
 - `confidence`
+- `tip`
+- `purchase_country`
+- `purchase_city`
 
 You can disable parts of the response in config to reduce prompt size and response size. For example, if you do not need VAT breakdowns, set `enabled_fields.vats` to `false`.
 
@@ -162,6 +165,9 @@ Default output shape:
         ],
     ],
     'confidence' => 0.93,
+    'tip' => null,
+    'purchase_country' => 'SE',
+    'purchase_city' => 'Stockholm',
 ]
 ```
 
@@ -174,6 +180,9 @@ Notes:
 - Dates are normalized to `YYYY-MM-DD` when possible.
 - Numeric values are normalized to numbers, not strings, when possible.
 - `mcc` is AI-estimated because receipts usually do not contain MCC directly.
+- `tip` is a numeric tip/gratuity amount when visible on the receipt; otherwise `null`.
+- `purchase_country` is the purchase country when inferable from receipt text, merchant/address, currency, or visible location; otherwise `null`.
+- `purchase_city` is the purchase city when visible or clearly inferable from receipt text/address; otherwise `null`.
 
 ## Provider selection
 

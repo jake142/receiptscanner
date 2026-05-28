@@ -96,6 +96,9 @@ return [
         'vats' => true,
         'line_items' => true,
         'confidence' => true,
+        'tip' => true,
+        'purchase_country' => true,
+        'purchase_city' => true,
     ],
 
     'exclude' => array_values(array_filter(array_map(
