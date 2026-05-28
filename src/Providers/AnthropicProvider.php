@@ -73,7 +73,7 @@ class AnthropicProvider
                 'failure_category' => 'transport',
             ]);
 
-            throw new ReceiptScannerException('Anthropic receipt extraction request failed: '.$exception->getMessage(), 0, $exception);
+            throw new ReceiptScannerException('Anthropic receipt extraction request failed: ' . $exception->getMessage(), 0, $exception);
         }
 
         if ($response->failed()) {
@@ -82,14 +82,14 @@ class AnthropicProvider
 
         $body = $response->json();
 
-        if (! is_array($body)) {
+        if (!is_array($body)) {
             throw new ReceiptScannerException('Anthropic receipt extraction returned a non-JSON response.');
         }
 
         $toolInput = $this->extractToolInput($body);
 
         if ($toolInput !== null) {
-            return $this->normalizeReceipt($toolInput);
+            return $this->normalizeReceipt($toolInput, $fields);
         }
 
         $text = $this->extractText($body);
@@ -98,7 +98,7 @@ class AnthropicProvider
             throw new ReceiptScannerException('Anthropic receipt extraction response did not contain tool input or text output.');
         }
 
-        return $this->normalizeReceipt($this->decodeJsonObject($text));
+        return $this->normalizeReceipt($this->decodeJsonObject($text), $fields);
     }
 
     private function messagesEndpoint(): string
@@ -109,7 +109,7 @@ class AnthropicProvider
             $baseUrl = self::DEFAULT_BASE_URL;
         }
 
-        return rtrim($baseUrl, '/').'/messages';
+        return rtrim($baseUrl, '/') . '/messages';
     }
 
     private function buildPayload(array $context, string $model, array $fields, bool &$usesPdf): array
@@ -162,14 +162,15 @@ class AnthropicProvider
         if ($prompt !== '') {
             return $prompt;
         }
+
         return 'You are a receipt extraction engine. Return structured JSON via the extract_receipt_json tool.';
     }
 
     private function userPrompt(array $fields): string
     {
         return 'Extract the receipt into structured JSON using the extract_receipt_json tool. '
-        . 'Analyze all provided images as one combined receipt. '
-        . 'Return values for these package fields exactly when requested: ' . implode(', ', $fields) . '.';
+            . 'Analyze all provided images as one combined receipt. '
+            . 'Return values for these package fields exactly when requested: ' . implode(', ', $fields) . '.';
     }
 
     private function toolInputSchema(array $fields): array
@@ -182,7 +183,7 @@ class AnthropicProvider
 
         return [
             'type' => 'object',
-            'additionalProperties' => true,
+            'additionalProperties' => false,
             'properties' => $properties,
             'required' => array_values($fields),
         ];
@@ -191,79 +192,51 @@ class AnthropicProvider
     private function schemaForField(string $field): array
     {
         return match ($field) {
-            'merchant' => [
-                'type' => ['string', 'null'],
-                'description' => 'Merchant or store name printed on the receipt.',
-            ],
-            'date' => [
-                'type' => ['string', 'null'],
-                'description' => 'Receipt date, preferably ISO-8601 when the full date can be determined.',
-            ],
-            'total', 'amount' => [
-                'type' => ['number', 'string', 'null'],
-                'description' => 'Monetary amount from the receipt without inventing missing values.',
-            ],
-            'currency' => [
-                'type' => ['string', 'null'],
-                'description' => 'ISO-4217 currency code when it can be inferred.',
-            ],
+            'merchant' => ['type' => ['string', 'null']],
+            'total_amount' => ['type' => ['number', 'string', 'null']],
+            'currency' => ['type' => ['string', 'null']],
+            'date' => ['type' => ['string', 'null']],
+            'vat_amount' => ['type' => ['number', 'string', 'null']],
+            'mcc' => ['type' => ['string', 'null']],
+            'confidence' => ['type' => ['number', 'null']],
+            'tip' => ['type' => ['number', 'string', 'null']],
+            'purchase_country' => ['type' => ['string', 'null']],
+            'purchase_city' => ['type' => ['string', 'null']],
             'line_items' => [
                 'type' => 'array',
-                'description' => 'Purchased items visible on the receipt.',
                 'items' => [
                     'type' => 'object',
-                    'additionalProperties' => true,
+                    'additionalProperties' => false,
                     'properties' => [
                         'description' => ['type' => ['string', 'null']],
                         'quantity' => ['type' => ['number', 'string', 'null']],
                         'unit_price' => ['type' => ['number', 'string', 'null']],
-                        'total' => ['type' => ['number', 'string', 'null']],
                         'amount' => ['type' => ['number', 'string', 'null']],
-                        'vat_rate' => ['type' => ['number', 'string', 'null']],
-                        'vat_amount' => ['type' => ['number', 'string', 'null']],
-                        'sku' => ['type' => ['string', 'null']],
                     ],
+                    'required' => ['description', 'quantity', 'unit_price', 'amount'],
                 ],
             ],
             'vats' => [
                 'type' => 'array',
-                'description' => 'VAT breakdown rows for the receipt.',
                 'items' => [
                     'type' => 'object',
-                    'additionalProperties' => true,
+                    'additionalProperties' => false,
                     'properties' => [
-                        'vat_rate' => ['type' => ['number', 'string', 'null']],
-                        'amount_excluding_vat' => ['type' => ['number', 'string', 'null']],
-                        'vat_amount' => ['type' => ['number', 'string', 'null']],
-                        'amount_including_vat' => ['type' => ['number', 'string', 'null']],
+                        'rate' => ['type' => ['number', 'string', 'null']],
+                        'amount' => ['type' => ['number', 'string', 'null']],
+                        'amount_inc_vat' => ['type' => ['number', 'string', 'null']],
+                        'amount_ex_vat' => ['type' => ['number', 'string', 'null']],
                     ],
+                    'required' => ['rate', 'amount', 'amount_inc_vat', 'amount_ex_vat'],
                 ],
             ],
-            'mcc' => [
-                'type' => ['string', 'null'],
-                'description' => 'Merchant category code when present or confidently inferable from receipt evidence.',
-            ],
-            'confidence' => [
-                'type' => ['number', 'null'],
-                'minimum' => 0,
-                'maximum' => 1,
-                'description' => 'Overall extraction confidence between 0 and 1.',
-            ],
-            'metadata' => [
-                'type' => ['object', 'null'],
-                'additionalProperties' => true,
-                'description' => 'Additional non-sensitive receipt metadata such as receipt number, payment method, store address, or locale when visible.',
-            ],
-            default => [
-                'type' => ['string', 'number', 'boolean', 'array', 'object', 'null'],
-                'description' => 'Configured receipt extraction field.',
-            ],
+            default => ['type' => ['string', 'number', 'boolean', 'array', 'object', 'null']],
         };
     }
 
     private function fileBlock(string $path, array $context): array
     {
-        if (! is_file($path) || ! is_readable($path)) {
+        if (!is_file($path) || !is_readable($path)) {
             throw new ReceiptScannerException("Receipt input file is not readable: {$path}");
         }
 
@@ -290,7 +263,7 @@ class AnthropicProvider
         if (str_starts_with($mimeType, 'image/')) {
             $mimeType = $mimeType === 'image/jpg' ? 'image/jpeg' : $mimeType;
 
-            if (! in_array($mimeType, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) {
+            if (!in_array($mimeType, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) {
                 throw new ReceiptScannerException("Anthropic receipt extraction does not support image MIME type {$mimeType}.");
             }
 
@@ -315,11 +288,11 @@ class AnthropicProvider
             $paths = [$paths];
         }
 
-        if (! is_array($paths)) {
+        if (!is_array($paths)) {
             throw new ReceiptScannerException('Receipt scan context must include one or more input paths.');
         }
 
-        $paths = array_values(array_filter($paths, static fn ($path): bool => is_string($path) && trim($path) !== ''));
+        $paths = array_values(array_filter($paths, static fn($path): bool => is_string($path) && trim($path) !== ''));
 
         if ($paths === []) {
             throw new ReceiptScannerException('Receipt scan context must include one or more input paths.');
@@ -382,12 +355,12 @@ class AnthropicProvider
     {
         $fields = $options['fields'] ?? ($context['fields'] ?? config('receiptscanner.fields', []));
 
-        if (! is_array($fields)) {
+        if (!is_array($fields)) {
             $fields = [];
         }
 
         $fields = array_values(array_unique(array_filter(array_map(
-            static fn ($field): string => is_string($field) ? trim($field) : '',
+            static fn($field): string => is_string($field) ? trim($field) : '',
             $fields
         ))));
 
@@ -397,15 +370,17 @@ class AnthropicProvider
 
         return [
             'merchant',
-            'date',
-            'total',
-            'amount',
+            'total_amount',
             'currency',
-            'line_items',
-            'vats',
+            'date',
+            'vat_amount',
             'mcc',
+            'vats',
+            'line_items',
             'confidence',
-            'metadata',
+            'tip',
+            'purchase_country',
+            'purchase_city',
         ];
     }
 
@@ -413,12 +388,12 @@ class AnthropicProvider
     {
         $content = $body['content'] ?? null;
 
-        if (! is_array($content)) {
+        if (!is_array($content)) {
             return null;
         }
 
         foreach ($content as $block) {
-            if (! is_array($block)) {
+            if (!is_array($block)) {
                 continue;
             }
 
@@ -444,13 +419,13 @@ class AnthropicProvider
             return $content;
         }
 
-        if (! is_array($content)) {
+        if (!is_array($content)) {
             return null;
         }
 
         foreach ($content as $block) {
-            if (is_array($block) && is_string($block['text'] ?? null) && trim($block['text']) !== '') {
-                return $block['text'];
+            if (is_array($block) && is_string($block['text'] ?? null) && trim((string) $block['text']) !== '') {
+                return (string) $block['text'];
             }
         }
 
@@ -459,180 +434,69 @@ class AnthropicProvider
 
     private function decodeJsonObject(string $text): array
     {
-        $candidate = trim($text);
-        $decoded = json_decode($candidate, true);
+        $decoded = json_decode($text, true);
 
-        if (is_array($decoded)) {
-            return $decoded;
+        if (!is_array($decoded)) {
+            throw new ReceiptScannerException('Anthropic receipt extraction returned invalid JSON.');
         }
 
-        if (preg_match('/```(?:json)?\s*(.*?)\s*```/is', $candidate, $matches) === 1) {
-            $decoded = json_decode(trim($matches[1]), true);
-
-            if (is_array($decoded)) {
-                return $decoded;
-            }
-        }
-
-        $start = strpos($candidate, '{');
-        $end = strrpos($candidate, '}');
-
-        if ($start !== false && $end !== false && $end > $start) {
-            $decoded = json_decode(substr($candidate, $start, $end - $start + 1), true);
-
-            if (is_array($decoded)) {
-                return $decoded;
-            }
-        }
-
-        throw new ReceiptScannerException('Anthropic receipt extraction response did not contain a valid JSON object.');
+        return $decoded;
     }
 
-    private function normalizeReceipt(array $payload): array
+    private function normalizeReceipt(array $data, array $fields): array
     {
-        if (isset($payload['tax']) || isset($payload['vat']) || isset($payload['tax_amount'])) {
-            $payload['vats'] = $this->normalizeVats($payload);
-            unset($payload['tax'], $payload['vat'], $payload['tax_amount']);
+        $normalized = [];
+
+        foreach ($fields as $field) {
+            $normalized[$field] = array_key_exists($field, $data) ? $data[$field] : null;
         }
 
-        if (isset($payload['vats']) && is_array($payload['vats'])) {
-            $payload['vats'] = $this->normalizeVats(['vats' => $payload['vats']]);
-        }
-
-        return $payload;
+        return $normalized;
     }
 
-    private function normalizeVats(array $payload): array
+    private function throwProviderHttpError(Response $response, string $model, ?string $mimeType, int $retries, float $start): void
     {
-        $vats = $payload['vats'] ?? null;
+        $durationMs = (int) ((microtime(true) - $start) * 1000);
+        $status = $response->status();
+        $responseBody = null;
 
-        if (is_array($vats) && $vats !== []) {
-            return array_values(array_map(function ($row): array {
-                $row = is_array($row) ? $row : [];
-
-                return [
-                    'vat_rate' => $this->numericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
-                    'amount_excluding_vat' => $this->numericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['amount'] ?? null),
-                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? $row['tax'] ?? null),
-                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['total'] ?? $row['amount'] ?? null),
-                ];
-            }, $vats));
+        try {
+            $responseBody = $response->json();
+        } catch (Throwable) {
+            $responseBody = $response->body();
         }
-
-        $singleVat = $payload['vat'] ?? $payload['tax'] ?? $payload['tax_amount'] ?? null;
-
-        if ($singleVat === null) {
-            return [];
-        }
-
-        return [[
-            'vat_rate' => $this->numericOrNull($payload['vat_rate'] ?? null),
-            'amount_excluding_vat' => $this->numericOrNull($payload['amount_excluding_vat'] ?? $payload['net_amount'] ?? null),
-            'vat_amount' => $this->numericOrNull($singleVat),
-            'amount_including_vat' => $this->numericOrNull($payload['amount_including_vat'] ?? $payload['total'] ?? null),
-        ]];
-    }
-
-    private function numericOrNull(mixed $value): ?float
-    {
-        if (is_int($value) || is_float($value)) {
-            return (float) $value;
-        }
-
-        if (is_string($value)) {
-            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
-
-            if ($normalized !== '' && is_numeric($normalized)) {
-                return (float) $normalized;
-            }
-        }
-
-        return null;
-    }
-
-    private function throwProviderHttpError(Response $response, string $model, mixed $mimeType, int $retries, float $start): never
-    {
-        $requestId = $this->requestId($response);
-        $message = $this->providerErrorMessage($response);
-        $failureCategory = $response->status() >= 500 ? 'upstream_5xx' : ($response->status() === 429 ? 'rate_limited' : 'http_error');
 
         $this->logDiagnostic('Anthropic receipt extraction HTTP error', [
             'provider' => 'anthropic',
             'model' => $model,
-            'mime_type' => is_string($mimeType) ? $mimeType : null,
+            'mime_type' => $mimeType,
             'retry_count' => $retries,
-            'duration_ms' => (int) ((microtime(true) - $start) * 1000),
-            'failure_category' => $failureCategory,
+            'duration_ms' => $durationMs,
+            'http_status' => $status,
+            'response' => $responseBody,
         ]);
 
-        throw new ReceiptScannerException('Anthropic receipt extraction failed with HTTP '.$response->status().($requestId ? " (request_id {$requestId})" : '').': '.$message);
+        throw new ReceiptScannerException('Anthropic receipt extraction request failed with HTTP status ' . $status . '.');
     }
 
-    private function providerErrorMessage(Response $response): string
+    private function logDiagnostic(string $message, array $context = []): void
     {
-        $json = $response->json();
+        $enabled = (bool) config('receiptscanner.logging.enabled', false);
 
-        if (is_array($json)) {
-            $error = $json['error'] ?? null;
-
-            if (is_array($error)) {
-                $type = is_string($error['type'] ?? null) ? $error['type'] : null;
-                $message = is_string($error['message'] ?? null) ? $error['message'] : null;
-
-                if ($type !== null && $message !== null) {
-                    return $this->safeExcerpt($type.': '.$message);
-                }
-
-                if ($message !== null) {
-                    return $this->safeExcerpt($message);
-                }
-            }
-
-            if (is_string($json['message'] ?? null)) {
-                return $this->safeExcerpt($json['message']);
-            }
-        }
-
-        return $this->safeExcerpt($response->body());
-    }
-
-    private function requestId(Response $response): ?string
-    {
-        foreach (['request-id', 'x-request-id', 'anthropic-request-id'] as $header) {
-            $value = $response->header($header);
-
-            if (is_string($value) && trim($value) !== '') {
-                return trim($value);
-            }
-        }
-
-        return null;
-    }
-
-    private function safeExcerpt(string $value, int $limit = 500): string
-    {
-        $value = preg_replace('/Bearer\s+[A-Za-z0-9._\-]+/i', 'Bearer [redacted]', $value) ?? $value;
-        $value = preg_replace('/(?:x-api-key|api-key|authorization)(\s*[:=]\s*)[^\s,}]+/i', '$1[redacted]', $value) ?? $value;
-        $value = preg_replace('/[A-Za-z0-9+\/]{120,}={0,2}/', '[redacted-base64]', $value) ?? $value;
-        $value = trim($value);
-
-        if ($value === '') {
-            return 'No response message provided by Anthropic.';
-        }
-
-        if (strlen($value) <= $limit) {
-            return $value;
-        }
-
-        return substr($value, 0, $limit).'...';
-    }
-
-    private function logDiagnostic(string $message, array $diagnostic): void
-    {
-        if (! (bool) config('receiptscanner.logging', false)) {
+        if (! $enabled) {
             return;
         }
 
-        Log::channel((string) config('logging.default', 'stack'))->warning($message, $diagnostic);
+        $channel = config('receiptscanner.logging.channel');
+        $level = config('receiptscanner.logging.level', 'info');
+
+        $context = array_merge(['provider' => 'anthropic'], $context);
+
+        if (is_string($channel) && $channel !== '') {
+            Log::channel($channel)->{$level}($message, $context);
+            return;
+        }
+
+        Log::{$level}($message, $context);
     }
 }

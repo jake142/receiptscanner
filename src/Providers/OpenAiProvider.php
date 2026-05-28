@@ -7,6 +7,7 @@ namespace Jake142\ReceiptScanner\Providers;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Jake142\ReceiptScanner\Prompt\ReceiptPrompt;
 use RuntimeException;
 use Throwable;
 
@@ -86,29 +87,67 @@ class OpenAiProvider
      */
     private function fieldsFromContext(array $context): array
     {
-        $fields = $context['fields'] ?? null;
+        $prompt = new ReceiptPrompt();
+        $canonical = $prompt->fields();
+        $enabled = $this->normalizeEnabledFields($context['fields'] ?? null);
 
-        if (! is_array($fields) || $fields === []) {
-            $fields = config('receiptscanner.fields', []);
+        if ($enabled === []) {
+            $enabled = $this->normalizeEnabledFields(config('receiptscanner.enabled_fields', []));
+        }
+
+        if ($enabled === []) {
+            return $canonical;
+        }
+
+        $fields = [];
+
+        foreach ($canonical as $field) {
+            if (in_array($field, $enabled, true)) {
+                $fields[] = $field;
+            }
+        }
+
+        return $fields === [] ? $canonical : $fields;
+    }
+
+    /**
+     * @param mixed $fields
+     * @return array<int, string>
+     */
+    private function normalizeEnabledFields(mixed $fields): array
+    {
+        if (is_string($fields)) {
+            $fields = array_map('trim', explode(',', $fields));
         }
 
         if (! is_array($fields) || $fields === []) {
-            $fields = [
-                'merchant',
-                'date',
-                'amount',
-                'currency',
-                'vat_amount',
-                'line_items',
-                'mcc',
-                'vats',
-            ];
+            return [];
         }
 
-        return array_values(array_unique(array_filter(array_map(
-            static fn ($field): string => is_string($field) ? trim($field) : '',
-            $fields
-        ))));
+        $normalized = [];
+
+        foreach ($fields as $key => $value) {
+            if (is_int($key) && is_string($value)) {
+                $field = strtolower(trim($value));
+                if ($field !== '') {
+                    $normalized[$field] = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_bool($value)) {
+                if ($value) {
+                    $normalized[strtolower(trim($key))] = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_scalar($value) && filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                $normalized[strtolower(trim($key))] = true;
+            }
+        }
+
+        return array_values(array_keys($normalized));
     }
 
     /**
@@ -169,7 +208,6 @@ class OpenAiProvider
 
     /**
      * @param array<string, mixed> $context
-     * @return array<int, string>
      */
     private function pathsFromContext(array $context): array
     {
@@ -298,57 +336,10 @@ class OpenAiProvider
      */
     private function buildReceiptJsonSchema(array $fields): array
     {
-        $knownProperties = [
-            'merchant' => ['type' => ['string', 'null']],
-            'date' => ['type' => ['string', 'null']],
-            'amount' => ['type' => ['number', 'string', 'null']],
-            'currency' => ['type' => ['string', 'null']],
-            'vat_amount' => ['type' => ['number', 'string', 'null']],
-            'line_items' => [
-                'type' => ['array', 'null'],
-                'items' => [
-                    'type' => 'object',
-                    'additionalProperties' => false,
-                    'properties' => [
-                        'description' => ['type' => ['string', 'null']],
-                        'quantity' => ['type' => ['number', 'string', 'null']],
-                        'unit_price' => ['type' => ['number', 'string', 'null']],
-                        'amount' => ['type' => ['number', 'string', 'null']],
-                    ],
-                    'required' => ['description', 'quantity', 'unit_price', 'amount'],
-                ],
-            ],
-            'mcc' => ['type' => ['string', 'null']],
-            'vats' => [
-                'type' => ['array', 'null'],
-                'items' => [
-                    'type' => 'object',
-                    'additionalProperties' => false,
-                    'properties' => [
-                        'vat_amount' => ['type' => ['number', 'string', 'null']],
-                        'vat_rate' => ['type' => ['number', 'string', 'null']],
-                        'amount_including_vat' => ['type' => ['number', 'string', 'null']],
-                        'amount_excluding_vat' => ['type' => ['number', 'string', 'null']],
-                    ],
-                    'required' => ['vat_amount', 'vat_rate', 'amount_including_vat', 'amount_excluding_vat'],
-                ],
-            ],
-        ];
+        $prompt = new ReceiptPrompt();
+        $schema = $prompt->jsonSchema($fields, 'images');
 
-        $properties = [];
-
-        foreach ($fields as $field) {
-            $properties[$field] = $knownProperties[$field] ?? [
-                'type' => ['string', 'number', 'integer', 'boolean', 'object', 'array', 'null'],
-            ];
-        }
-
-        return [
-            'type' => 'object',
-            'additionalProperties' => false,
-            'properties' => $properties,
-            'required' => array_values($fields),
-        ];
+        return $schema;
     }
 
     /**
@@ -512,82 +503,156 @@ class OpenAiProvider
      */
     private function normalizeReceiptPayload(array $payload, array $fields): array
     {
-        if (isset($payload['tax']) && ! isset($payload['vat_amount'])) {
-            $payload['vat_amount'] = $payload['tax'];
+        $canonical = [
+            'merchant' => $this->normalizeNullableString($payload['merchant'] ?? null),
+            'total_amount' => $this->normalizeNullableNumber($payload['total_amount'] ?? $payload['amount'] ?? null),
+            'currency' => $this->normalizeNullableString($payload['currency'] ?? null),
+            'date' => $this->normalizeNullableDate($payload['date'] ?? null),
+            'vat_amount' => $this->normalizeNullableNumber($payload['vat_amount'] ?? $payload['tax_amount'] ?? $payload['vat'] ?? $payload['tax'] ?? null),
+            'mcc' => $this->normalizeNullableString($payload['mcc'] ?? null),
+            'vats' => $this->normalizeVats($payload),
+            'line_items' => $this->normalizeLineItems($payload['line_items'] ?? null),
+            'confidence' => $this->normalizeNullableNumber($payload['confidence'] ?? null),
+            'tip' => $this->normalizeNullableNumber($payload['tip'] ?? null),
+            'purchase_country' => $this->normalizeNullableString($payload['purchase_country'] ?? null),
+            'purchase_city' => $this->normalizeNullableString($payload['purchase_city'] ?? null),
+        ];
+
+        $result = [];
+
+        foreach ($fields as $field) {
+            if (array_key_exists($field, $canonical)) {
+                $result[$field] = $canonical[$field];
+            }
         }
 
-        if (isset($payload['vat']) && ! isset($payload['vat_amount'])) {
-            $payload['vat_amount'] = $payload['vat'];
-        }
-
-        if (! isset($payload['vats']) || ! is_array($payload['vats'])) {
-            $payload['vats'] = $this->buildVatsFromLegacyFields($payload);
-        } else {
-            $payload['vats'] = $this->normalizeVats($payload['vats']);
-        }
-
-        if (in_array('vats', $fields, true)) {
-            unset($payload['tax'], $payload['vat']);
-        }
-
-        return $payload;
+        return $result;
     }
 
     /**
      * @param array<string, mixed> $payload
      * @return array<int, array<string, mixed>>
      */
-    private function buildVatsFromLegacyFields(array $payload): array
+    private function normalizeVats(array $payload): array
     {
-        $vatAmount = $this->numericValue($payload['vat_amount'] ?? null);
-        $amount = $this->numericValue($payload['amount'] ?? null);
+        $rows = [];
 
-        if ($vatAmount === null && ! isset($payload['tax']) && ! isset($payload['vat'])) {
-            return [];
+        $source = $payload['vats'] ?? null;
+        if (is_array($source)) {
+            foreach ($source as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+
+                $rows[] = $this->normalizeVatRow($row);
+            }
         }
 
-        return [[
-            'vat_rate' => $this->numericValue($payload['vat_rate'] ?? null),
-            'amount_excluding_vat' => $this->numericValue($payload['amount_excluding_vat'] ?? null),
-            'vat_amount' => $vatAmount,
-            'amount_including_vat' => $this->numericValue($payload['amount_including_vat'] ?? $amount),
-        ]];
+        if ($rows !== []) {
+            return $rows;
+        }
+
+        $legacyRow = [
+            'rate' => $payload['vat_rate'] ?? $payload['tax_rate'] ?? null,
+            'amount' => $payload['vat_amount'] ?? $payload['tax_amount'] ?? $payload['tax'] ?? $payload['vat'] ?? null,
+            'amount_ex_vat' => $payload['amount_excluding_vat'] ?? $payload['subtotal'] ?? null,
+            'amount_inc_vat' => $payload['amount_including_vat'] ?? $payload['total'] ?? $payload['amount'] ?? null,
+        ];
+
+        if ($legacyRow['rate'] !== null || $legacyRow['amount'] !== null || $legacyRow['amount_ex_vat'] !== null || $legacyRow['amount_inc_vat'] !== null) {
+            return [$this->normalizeVatRow($legacyRow)];
+        }
+
+        return [];
     }
 
     /**
-     * @param array<int, mixed> $vats
-     * @return array<int, array<string, mixed>>
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
      */
-    private function normalizeVats(array $vats): array
+    private function normalizeVatRow(array $row): array
     {
+        return [
+            'rate' => $this->normalizeNullableNumber($row['rate'] ?? $row['vat_rate'] ?? null),
+            'amount' => $this->normalizeNullableNumber($row['amount'] ?? $row['vat_amount'] ?? $row['tax_amount'] ?? null),
+            'amount_inc_vat' => $this->normalizeNullableNumber($row['amount_inc_vat'] ?? $row['amount_including_vat'] ?? $row['gross_amount'] ?? null),
+            'amount_ex_vat' => $this->normalizeNullableNumber($row['amount_ex_vat'] ?? $row['amount_excluding_vat'] ?? $row['net_amount'] ?? null),
+        ];
+    }
+
+    private function normalizeLineItems(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
         $normalized = [];
 
-        foreach ($vats as $row) {
-            if (! is_array($row)) {
+        foreach ($value as $item) {
+            if (! is_array($item)) {
                 continue;
             }
 
             $normalized[] = [
-                'vat_rate' => $this->numericValue($row['vat_rate'] ?? ($row['rate'] ?? null)),
-                'amount_excluding_vat' => $this->numericValue($row['amount_excluding_vat'] ?? ($row['net_amount'] ?? ($row['net'] ?? null))),
-                'vat_amount' => $this->numericValue($row['vat_amount'] ?? ($row['tax_amount'] ?? ($row['vat'] ?? ($row['tax'] ?? null)))),
-                'amount_including_vat' => $this->numericValue($row['amount_including_vat'] ?? ($row['gross_amount'] ?? ($row['gross'] ?? null))),
+                'description' => $this->normalizeNullableString($item['description'] ?? null),
+                'quantity' => $this->normalizeNullableNumber($item['quantity'] ?? null),
+                'unit_price' => $this->normalizeNullableNumber($item['unit_price'] ?? null),
+                'amount' => $this->normalizeNullableNumber($item['amount'] ?? $item['amount_including_vat'] ?? null),
             ];
         }
 
         return $normalized;
     }
 
-    private function numericValue(mixed $value): mixed
+    private function normalizeNullableString(mixed $value): ?string
     {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_string($value)) {
+            $value = trim($value);
+            return $value === '' ? null : $value;
+        }
+
+        if (is_int($value) || is_float($value) || is_bool($value)) {
+            return (string) $value;
+        }
+
+        return null;
+    }
+
+    private function normalizeNullableNumber(mixed $value): ?float
+    {
+        if ($value === null) {
+            return null;
+        }
+
         if (is_int($value) || is_float($value)) {
-            return $value;
+            return (float) $value;
         }
 
-        if (is_string($value) && is_numeric(trim($value))) {
-            return $value + 0;
+        if (is_string($value)) {
+            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
+
+            if ($normalized === '' || ! is_numeric($normalized)) {
+                return null;
+            }
+
+            return (float) $normalized;
         }
 
-        return $value;
+        return null;
+    }
+
+    private function normalizeNullableDate(mixed $value): ?string
+    {
+        $value = $this->normalizeNullableString($value);
+
+        if ($value === null) {
+            return null;
+        }
+
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : null;
     }
 }

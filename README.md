@@ -142,32 +142,32 @@ Default output shape:
 
 ```php
 [
-    'merchant' => 'Coffee Shop',
-    'total_amount' => 18.40,
-    'currency' => 'SEK',
-    'date' => '2025-05-27',
-    'vat_amount' => 3.68,
-    'mcc' => '5814',
+    'merchant' => null,
+    'total_amount' => null,
+    'currency' => null,
+    'date' => null,
+    'vat_amount' => null,
+    'mcc' => null,
     'vats' => [
         [
-            'rate' => 25,
-            'amount' => 3.68,
-            'amount_inc_vat' => 18.40,
-            'amount_ex_vat' => 14.72,
+            'rate' => null,
+            'amount' => null,
+            'amount_inc_vat' => null,
+            'amount_ex_vat' => null,
         ],
     ],
     'line_items' => [
         [
-            'description' => 'Latte',
-            'quantity' => 1,
-            'unit_price' => 42.00,
-            'amount' => 42.00,
+            'description' => null,
+            'quantity' => null,
+            'unit_price' => null,
+            'amount' => null,
         ],
     ],
-    'confidence' => 0.93,
+    'confidence' => null,
     'tip' => null,
-    'purchase_country' => 'SE',
-    'purchase_city' => 'Stockholm',
+    'purchase_country' => null,
+    'purchase_city' => null,
 ]
 ```
 

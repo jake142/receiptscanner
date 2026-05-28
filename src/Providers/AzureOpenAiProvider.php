@@ -9,6 +9,7 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
+use Jake142\ReceiptScanner\Prompt\ReceiptPrompt;
 use RuntimeException;
 
 class AzureOpenAiProvider
@@ -248,99 +249,58 @@ class AzureOpenAiProvider
     private function resolveFields(array $context): array
     {
         $options = is_array($context['options'] ?? null) ? $context['options'] : [];
-        $fields = $context['fields'] ?? ($options['fields'] ?? config('receiptscanner.fields', []));
+        $configured = $context['fields'] ?? ($options['fields'] ?? config('receiptscanner.enabled_fields', []));
+        $canonical = (new ReceiptPrompt())->fields();
 
-        if (is_string($fields)) {
-            $fields = array_map('trim', explode(',', $fields));
+        if (is_string($configured)) {
+            $configured = array_map('trim', explode(',', $configured));
         }
 
-        if (! is_array($fields)) {
-            $fields = [];
+        if (! is_array($configured)) {
+            $configured = [];
         }
 
-        $fields = array_values(array_unique(array_filter(array_map(static fn ($field): string => trim((string) $field), $fields))));
+        $requested = [];
 
-        if ($fields === []) {
-            $fields = [
-                'merchant',
-                'date',
-                'total',
-                'amount',
-                'currency',
-                'mcc',
-                'line_items',
-                'vats',
-                'confidence',
-                'metadata',
-            ];
+        foreach ($configured as $key => $value) {
+            if (is_int($key) && is_string($value)) {
+                $field = strtolower(trim($value));
+                if ($field !== '') {
+                    $requested[$field] = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_bool($value)) {
+                if ($value) {
+                    $requested[strtolower(trim($key))] = true;
+                }
+                continue;
+            }
+
+            if (is_string($key) && is_scalar($value) && filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                $requested[strtolower(trim($key))] = true;
+            }
         }
 
-        return $fields;
+        if ($requested === []) {
+            return $canonical;
+        }
+
+        $fields = [];
+
+        foreach ($canonical as $field) {
+            if (isset($requested[$field])) {
+                $fields[] = $field;
+            }
+        }
+
+        return $fields === [] ? $canonical : $fields;
     }
 
     private function receiptSchema(array $fields): array
     {
-        $properties = [];
-
-        foreach ($fields as $field) {
-            $properties[$field] = $this->schemaForField($field);
-        }
-
-        return [
-            'type' => 'object',
-            'properties' => $properties,
-            'required' => array_values($fields),
-            'additionalProperties' => false,
-        ];
-    }
-
-    private function schemaForField(string $field): array
-    {
-        return match ($field) {
-            'merchant', 'date', 'currency', 'mcc' => ['type' => ['string', 'null']],
-            'total', 'amount', 'confidence' => ['type' => ['number', 'null']],
-            'vats' => [
-                'type' => 'array',
-                'items' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'vat_rate' => ['type' => ['number', 'null']],
-                        'amount_excluding_vat' => ['type' => ['number', 'null']],
-                        'vat_amount' => ['type' => ['number', 'null']],
-                        'amount_including_vat' => ['type' => ['number', 'null']],
-                    ],
-                    'required' => ['vat_rate', 'amount_excluding_vat', 'vat_amount', 'amount_including_vat'],
-                    'additionalProperties' => false,
-                ],
-            ],
-            'line_items' => [
-                'type' => 'array',
-                'items' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'description' => ['type' => ['string', 'null']],
-                        'quantity' => ['type' => ['number', 'null']],
-                        'unit_price' => ['type' => ['number', 'null']],
-                        'total' => ['type' => ['number', 'null']],
-                    ],
-                    'required' => ['description', 'quantity', 'unit_price', 'total'],
-                    'additionalProperties' => false,
-                ],
-            ],
-            'metadata' => [
-                'type' => 'object',
-                'properties' => [
-                    'payment_method' => ['type' => ['string', 'null']],
-                    'receipt_number' => ['type' => ['string', 'null']],
-                    'store_address' => ['type' => ['string', 'null']],
-                    'raw_locale' => ['type' => ['string', 'null']],
-                    'notes' => ['type' => ['string', 'null']],
-                ],
-                'required' => ['payment_method', 'receipt_number', 'store_address', 'raw_locale', 'notes'],
-                'additionalProperties' => false,
-            ],
-            default => ['type' => ['string', 'number', 'boolean', 'null']],
-        };
+        return (new ReceiptPrompt())->jsonSchema($fields, 'images');
     }
 
     private function send(string $url, string $apiKey, array $payload, string $mode, array $context): Response
@@ -529,118 +489,157 @@ class AzureOpenAiProvider
 
     private function normalizeReceipt(array $result, array $fields): array
     {
-        $result = $this->normalizeVatAliases($result);
+        $canonical = [
+            'merchant' => null,
+            'total_amount' => null,
+            'currency' => null,
+            'date' => null,
+            'vat_amount' => null,
+            'mcc' => null,
+            'vats' => [],
+            'line_items' => [],
+            'confidence' => null,
+            'tip' => null,
+            'purchase_country' => null,
+            'purchase_city' => null,
+        ];
+
+        $canonical['merchant'] = $this->normalizeNullableString($result['merchant'] ?? null);
+        $canonical['total_amount'] = $this->normalizeNullableNumber($result['total_amount'] ?? $result['amount'] ?? null);
+        $canonical['currency'] = $this->normalizeNullableString($result['currency'] ?? null);
+        $canonical['date'] = $this->normalizeNullableDate($result['date'] ?? null);
+        $canonical['vat_amount'] = $this->normalizeNullableNumber($result['vat_amount'] ?? $result['tax_amount'] ?? $result['vat'] ?? $result['tax'] ?? null);
+        $canonical['mcc'] = $this->normalizeNullableString($result['mcc'] ?? null);
+        $canonical['vats'] = $this->normalizeVats($result);
+        $canonical['line_items'] = $this->normalizeLineItems($result['line_items'] ?? null);
+        $canonical['confidence'] = $this->normalizeNullableNumber($result['confidence'] ?? null);
+        $canonical['tip'] = $this->normalizeNullableNumber($result['tip'] ?? null);
+        $canonical['purchase_country'] = $this->normalizeNullableString($result['purchase_country'] ?? null);
+        $canonical['purchase_city'] = $this->normalizeNullableString($result['purchase_city'] ?? null);
+
+        $output = [];
 
         foreach ($fields as $field) {
-            if (! array_key_exists($field, $result)) {
-                $result[$field] = $this->defaultValueForField($field);
+            if (array_key_exists($field, $canonical)) {
+                $output[$field] = $canonical[$field];
             }
         }
 
-        if (in_array('vats', $fields, true)) {
-            $result['vats'] = $this->normalizeVats($result['vats'] ?? null, $result);
-            unset($result['tax'], $result['vat'], $result['tax_amount']);
-        }
-
-        return $result;
+        return $output;
     }
 
-    private function normalizeVatAliases(array $result): array
+    private function normalizeLineItems(mixed $value): array
     {
-        if (! array_key_exists('vats', $result)) {
-            $legacy = [];
-
-            if (isset($result['vat']) || isset($result['tax']) || isset($result['tax_amount'])) {
-                $legacy[] = [
-                    'vat_rate' => $result['vat_rate'] ?? null,
-                    'amount_excluding_vat' => $result['amount_excluding_vat'] ?? $result['subtotal'] ?? null,
-                    'vat_amount' => $result['vat_amount'] ?? $result['tax_amount'] ?? $result['vat'] ?? $result['tax'] ?? null,
-                    'amount_including_vat' => $result['amount_including_vat'] ?? $result['total'] ?? $result['amount'] ?? null,
-                ];
-            }
-
-            if ($legacy !== []) {
-                $result['vats'] = $legacy;
-            }
-        }
-
-        return $result;
-    }
-
-    private function normalizeVats(mixed $vats, array $result): array
-    {
-        if (is_array($vats)) {
-            $normalized = [];
-
-            foreach ($vats as $row) {
-                if (! is_array($row)) {
-                    continue;
-                }
-
-                $normalized[] = [
-                    'vat_rate' => $this->numericOrNull($row['vat_rate'] ?? $row['rate'] ?? null),
-                    'amount_excluding_vat' => $this->numericOrNull($row['amount_excluding_vat'] ?? $row['net_amount'] ?? $row['net'] ?? null),
-                    'vat_amount' => $this->numericOrNull($row['vat_amount'] ?? $row['tax_amount'] ?? $row['vat'] ?? $row['tax'] ?? null),
-                    'amount_including_vat' => $this->numericOrNull($row['amount_including_vat'] ?? $row['gross_amount'] ?? $row['gross'] ?? $result['total'] ?? $result['amount'] ?? null),
-                ];
-            }
-
-            return $normalized;
-        }
-
-        if ($vats === null) {
+        if (! is_array($value)) {
             return [];
         }
 
-        return [[
-            'vat_rate' => $this->numericOrNull($result['vat_rate'] ?? null),
-            'amount_excluding_vat' => $this->numericOrNull($result['amount_excluding_vat'] ?? $result['subtotal'] ?? null),
-            'vat_amount' => $this->numericOrNull($vats),
-            'amount_including_vat' => $this->numericOrNull($result['amount_including_vat'] ?? $result['total'] ?? $result['amount'] ?? null),
-        ]];
+        $normalized = [];
+
+        foreach ($value as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $normalized[] = [
+                'description' => $this->normalizeNullableString($item['description'] ?? null),
+                'quantity' => $this->normalizeNullableNumber($item['quantity'] ?? null),
+                'unit_price' => $this->normalizeNullableNumber($item['unit_price'] ?? null),
+                'amount' => $this->normalizeNullableNumber($item['amount'] ?? $item['amount_including_vat'] ?? null),
+            ];
+        }
+
+        return $normalized;
     }
 
-    private function numericOrNull(mixed $value): ?float
+    private function normalizeVats(array $result): array
     {
+        $vats = $result['vats'] ?? null;
+        $rows = is_array($vats) ? $vats : [];
+
+        if ($rows === []) {
+            $legacyVat = $result['vat'] ?? $result['tax'] ?? null;
+
+            if (is_array($legacyVat)) {
+                $rows = $legacyVat;
+            } elseif ($legacyVat !== null || isset($result['vat_amount']) || isset($result['tax_amount'])) {
+                $rows = [[
+                    'rate' => $result['vat_rate'] ?? $result['tax_rate'] ?? null,
+                    'amount' => $result['vat_amount'] ?? $result['tax_amount'] ?? $legacyVat,
+                    'amount_inc_vat' => $result['amount_including_vat'] ?? $result['total_amount'] ?? $result['amount'] ?? null,
+                    'amount_ex_vat' => $result['amount_excluding_vat'] ?? $result['subtotal'] ?? null,
+                ]];
+            }
+        }
+
+        $normalized = [];
+
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            $normalized[] = [
+                'rate' => $this->normalizeNullableNumber($row['rate'] ?? $row['vat_rate'] ?? null),
+                'amount' => $this->normalizeNullableNumber($row['amount'] ?? $row['vat_amount'] ?? $row['tax_amount'] ?? null),
+                'amount_inc_vat' => $this->normalizeNullableNumber($row['amount_inc_vat'] ?? $row['amount_including_vat'] ?? $row['gross_amount'] ?? $result['total_amount'] ?? $result['amount'] ?? null),
+                'amount_ex_vat' => $this->normalizeNullableNumber($row['amount_ex_vat'] ?? $row['amount_excluding_vat'] ?? $row['net_amount'] ?? null),
+            ];
+        }
+
+        return $normalized;
+    }
+
+    private function normalizeNullableString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_string($value)) {
+            $value = trim($value);
+            return $value === '' ? null : $value;
+        }
+
+        if (is_int($value) || is_float($value) || is_bool($value)) {
+            return (string) $value;
+        }
+
+        return null;
+    }
+
+    private function normalizeNullableNumber(mixed $value): ?float
+    {
+        if ($value === null) {
+            return null;
+        }
+
         if (is_int($value) || is_float($value)) {
             return (float) $value;
         }
 
         if (is_string($value)) {
-            $value = trim(str_replace([' ', ','], ['', '.'], $value));
+            $normalized = str_replace([' ', ','], ['', '.'], trim($value));
 
-            if ($value !== '' && is_numeric($value)) {
-                return (float) $value;
+            if ($normalized === '' || ! is_numeric($normalized)) {
+                return null;
             }
+
+            return (float) $normalized;
         }
 
         return null;
     }
 
-    private function defaultValueForField(string $field): mixed
+    private function normalizeNullableDate(mixed $value): ?string
     {
-        return match ($field) {
-            'line_items', 'metadata', 'vats' => [],
-            default => null,
-        };
-    }
+        $value = $this->normalizeNullableString($value);
 
-    private function requestId(Response $response): ?string
-    {
-        foreach (['x-request-id', 'apim-request-id', 'x-ms-request-id', 'x-ms-client-request-id'] as $header) {
-            $value = $response->header($header);
-
-            if (is_string($value) && trim($value) !== '') {
-                return trim($value);
-            }
+        if ($value === null) {
+            return null;
         }
 
-        return null;
-    }
-
-    private function safeResponseExcerpt(Response $response): string
-    {
-        return $this->safeExcerpt($response->body());
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : null;
     }
 
     private function safeExcerpt(string $value): string

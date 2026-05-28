@@ -34,6 +34,9 @@ class ReceiptScannerService
         'vats',
         'line_items',
         'confidence',
+        'tip',
+        'purchase_country',
+        'purchase_city',
     ];
 
     public function __construct(
@@ -358,6 +361,9 @@ class ReceiptScannerService
             'vats' => $this->normalizeVats($decoded['vats'] ?? null, $decoded),
             'line_items' => $this->normalizeLineItems($decoded['line_items'] ?? null),
             'confidence' => $this->normalizeConfidence($decoded['confidence'] ?? null),
+            'tip' => $this->normalizeNullableNumber($decoded['tip'] ?? null),
+            'purchase_country' => $this->normalizeNullableString($decoded['purchase_country'] ?? null),
+            'purchase_city' => $this->normalizeNullableString($decoded['purchase_city'] ?? null),
         ];
 
         foreach (self::DEFAULT_FIELDS as $field) {
@@ -421,7 +427,7 @@ class ReceiptScannerService
             $normalized[] = [
                 'rate' => $this->normalizeNullableNumber($item['rate'] ?? $item['vat_rate'] ?? null),
                 'amount' => $this->normalizeNullableNumber($item['amount'] ?? $item['vat_amount'] ?? $item['tax_amount'] ?? null),
-                'amount_inc_vat' => $this->normalizeNullableNumber($item['amount_inc_vat'] ?? $item['amount_including_vat'] ?? $item['gross_amount'] ?? null),
+                'amount_inc_vat' => $this->normalizeNullableNumber($item['amount_inc_vat'] ?? $item['amount_including_vat'] ?? $item['gross_amount'] ?? $decoded['total_amount'] ?? $decoded['amount'] ?? null),
                 'amount_ex_vat' => $this->normalizeNullableNumber($item['amount_ex_vat'] ?? $item['amount_excluding_vat'] ?? $item['net_amount'] ?? null),
             ];
         }

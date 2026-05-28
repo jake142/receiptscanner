@@ -6,6 +6,7 @@ namespace Jake142\ReceiptScanner;
 
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
+use Jake142\ReceiptScanner\Prompt\ReceiptPrompt;
 use Jake142\ReceiptScanner\Providers\AnthropicProvider;
 use Jake142\ReceiptScanner\Providers\AzureOpenAiProvider;
 use Jake142\ReceiptScanner\Providers\GeminiProvider;
@@ -266,7 +267,9 @@ class ReceiptScannerManager
      */
     private function fieldsFromOptions(array $options): array
     {
-        $fields = $options['fields'] ?? config('receiptscanner.fields', []);
+        $prompt = new ReceiptPrompt();
+        $canonical = $prompt->fields();
+        $fields = $options['fields'] ?? config('receiptscanner.enabled_fields', []);
 
         if (is_string($fields)) {
             $fields = array_map('trim', explode(',', $fields));
@@ -276,58 +279,41 @@ class ReceiptScannerManager
             $fields = [];
         }
 
-        $normalized = [];
-        $hasUsableField = false;
+        $requested = [];
 
         foreach ($fields as $key => $value) {
             if (is_int($key) && is_string($value)) {
-                $field = trim($value);
+                $field = strtolower(trim($value));
                 if ($field !== '') {
-                    $normalized[$field] = true;
-                    $hasUsableField = true;
+                    $requested[$field] = true;
                 }
                 continue;
             }
 
             if (is_string($key) && is_bool($value)) {
                 if ($value) {
-                    $normalized[trim($key)] = true;
-                    $hasUsableField = true;
+                    $requested[strtolower(trim($key))] = true;
                 }
                 continue;
             }
 
-            if (is_string($key) && is_scalar($value)) {
-                if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
-                    $normalized[trim($key)] = true;
-                    $hasUsableField = true;
-                }
+            if (is_string($key) && is_scalar($value) && filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+                $requested[strtolower(trim($key))] = true;
             }
         }
 
-        $fields = array_values(array_filter(array_map(
-            static fn (string $field): string => strtolower(trim($field)),
-            array_keys($normalized)
-        ), static fn (string $field): bool => $field !== ''));
-
-        if ($fields !== []) {
-            return $fields;
+        if ($requested === []) {
+            return $canonical;
         }
 
-        if ($hasUsableField) {
-            return $fields;
+        $resolved = [];
+
+        foreach ($canonical as $field) {
+            if (isset($requested[$field])) {
+                $resolved[] = $field;
+            }
         }
 
-        return [
-            'merchant',
-            'date',
-            'amount',
-            'currency',
-            'mcc',
-            'line_items',
-            'vats',
-            'confidence',
-            'metadata',
-        ];
+        return $resolved === [] ? $canonical : $resolved;
     }
 }
