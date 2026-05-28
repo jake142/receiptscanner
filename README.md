@@ -1,4 +1,4 @@
-# ReceiptScanner
+# ReceiptScanner by Packr
 
 ReceiptScanner is a small Laravel package for extracting structured receipt data from images and PDFs using upstream AI providers.
 
