@@ -660,13 +660,7 @@ class GeminiProvider
 
     private function loggingEnabled(): bool
     {
-        $value = config('receiptscanner.logging', false);
-
-        if (is_bool($value)) {
-            return $value;
-        }
-
-        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
+        return (bool) config('receiptscanner.logging.enabled', false);
     }
 
     private function safeExcerpt(string $message): string

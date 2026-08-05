@@ -437,11 +437,13 @@ class OpenAiProvider
 
     private function logHttpFailure(Response $response): void
     {
-        if (! (bool) config('receiptscanner.logging', false)) {
+        if (! (bool) config('receiptscanner.logging.enabled', false)) {
             return;
         }
 
-        Log::channel((string) config('logging.default', 'stack'))->warning('OpenAI receipt extraction HTTP error.', [
+        $channel = config('receiptscanner.logging.channel');
+
+        Log::channel(is_string($channel) && $channel !== '' ? $channel : (string) config('logging.default', 'stack'))->warning('OpenAI receipt extraction HTTP error.', [
             'provider' => 'openai',
             'endpoint_mode' => 'responses',
             'status' => $response->status(),

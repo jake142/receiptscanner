@@ -371,8 +371,8 @@ class AzureOpenAiProvider
             'provider' => 'azure_openai',
             'endpoint_mode' => $mode,
             'status' => $response->status(),
-            'request_id' => $this->requestId($response),
-            'message' => $this->safeResponseExcerpt($response),
+            'request_id' => $this->requestIdFromResponse($response),
+            'message' => $this->safeResponseMessage($response),
         ];
 
         $this->logSafeDiagnostic('ReceiptScanner Azure OpenAI request failed', $diagnostic);
@@ -439,8 +439,8 @@ class AzureOpenAiProvider
             'provider' => 'azure_openai',
             'endpoint_mode' => $mode,
             'status' => $response->status(),
-            'request_id' => $this->requestId($response),
-            'message' => $this->safeResponseExcerpt($response),
+            'request_id' => $this->requestIdFromResponse($response),
+            'message' => $this->safeResponseMessage($response),
         ];
 
         throw new RuntimeException('Azure OpenAI response did not include text output: '.$diagnostic['message']);
@@ -468,7 +468,7 @@ class AzureOpenAiProvider
             'provider' => 'azure_openai',
             'endpoint_mode' => $mode,
             'status' => $response->status(),
-            'request_id' => $this->requestId($response),
+            'request_id' => $this->requestIdFromResponse($response),
             'message' => $this->safeExcerpt($text),
         ];
 
@@ -664,14 +664,52 @@ class AzureOpenAiProvider
         return $redacted;
     }
 
+    private function requestIdFromResponse(Response $response): ?string
+    {
+        foreach (['apim-request-id', 'x-ms-request-id', 'x-request-id', 'openai-request-id', 'request-id'] as $header) {
+            $value = $response->header($header);
+
+            if (is_string($value) && $value !== '') {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    private function safeResponseMessage(Response $response): string
+    {
+        $json = $response->json();
+        $message = '';
+
+        if (is_array($json)) {
+            $error = $json['error'] ?? null;
+
+            if (is_array($error) && is_string($error['message'] ?? null)) {
+                $message = $error['message'];
+            } elseif (is_string($json['message'] ?? null)) {
+                $message = $json['message'];
+            }
+        }
+
+        if ($message === '') {
+            $message = $response->body();
+        }
+
+        return $this->safeExcerpt($message);
+    }
+
     private function logSafeDiagnostic(string $message, array $diagnostic): void
     {
-        if (! config('receiptscanner.logging', false)) {
+        if (! (bool) config('receiptscanner.logging.enabled', false)) {
             return;
         }
 
         try {
-            Log::channel((string) (config('logging.default') ?: 'stack'))->warning($message, $diagnostic);
+            $channel = config('receiptscanner.logging.channel');
+
+            Log::channel(is_string($channel) && $channel !== '' ? $channel : (string) (config('logging.default') ?: 'stack'))
+                ->warning($message, $diagnostic);
         } catch (\Throwable) {
         }
     }
